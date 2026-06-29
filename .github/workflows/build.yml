@@ -1,0 +1,91 @@
+name: Build desktop binaries
+
+# Produces Windows / macOS / Linux builds. PyInstaller cannot cross-compile,
+# so each OS is built on its own runner.
+on:
+  push:
+    tags: ["v*"]          # e.g. git tag v1.0.0 && git push --tags
+  workflow_dispatch: {}    # also run manually from the Actions tab
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Linux WebKitGTK runtime needed by pywebview.
+      - name: Install Linux webview deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-0 libwebkit2gtk-4.1-0 gir1.2-webkit2-4.1
+
+      - name: Build React UI
+        run: |
+          cd frontend
+          npm ci || npm install
+          npm run build
+
+      - name: Install Python build deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt
+          # pywebview Linux backend bindings
+          if [ "${{ runner.os }}" = "Linux" ]; then pip install pygobject; fi
+        shell: bash
+
+      - name: PyInstaller build
+        run: pyinstaller desktop.spec
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          cd dist
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            zip -r ../InsurancePolicyExtractor-macos.zip InsurancePolicyExtractor.app
+          elif [ "${{ runner.os }}" = "Windows" ]; then
+            7z a ../InsurancePolicyExtractor-windows.zip InsurancePolicyExtractor
+          else
+            tar -czf ../InsurancePolicyExtractor-linux.tar.gz InsurancePolicyExtractor
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: InsurancePolicyExtractor-${{ runner.os }}
+          path: |
+            InsurancePolicyExtractor-*.zip
+            InsurancePolicyExtractor-*.tar.gz
+          if-no-files-found: ignore
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')   # only on tag pushes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write                          # required to create a Release
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true

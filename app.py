@@ -12,6 +12,7 @@ Then open http://127.0.0.1:5001 in your browser.
 
 import os
 import io
+import sys
 import glob
 import tempfile
 
@@ -20,7 +21,9 @@ import pandas as pd
 
 from extract_policies import read_text, extract_fields
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# When frozen by PyInstaller, bundled data lives under sys._MEIPASS. In a normal
+# source checkout it lives next to this file.
+BASE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 DIST_DIR = os.path.join(BASE_DIR, "frontend", "dist")
 
 # Column order shown in the UI / written to Excel.
