@@ -165,17 +165,19 @@ def extract_fields(text: str) -> dict:
     if not ncb_prev:
         ncb_prev = first(r"NCB in Previous Policy\s*:\s*(\d{1,2})\s*%", text)
 
+    # ── POLICY NUMBER ────────────────────────────────────────────────────
+    policy_no = first(r"Policy\s*(?:No\.?|Number)\s*:?\s*([A-Za-z0-9/.-]+(?:(?:\s+|/)[0-9]+){0,4})", text)
+
     return {
         "Party Name": party,
         "Insurance Company": insurer,
+        "Policy No.": policy_no,
         "Reg Number": reg,
         "Type of Insurance": ins_type,
-        "Premium without GST": prem_no_gst,
-        "Premium with GST": prem_gst,
+        "Premium": prem_gst,
         "Date Start": date_start,
         "End Date": date_end,
         "NCB (applied this yr)": ncb_applied + ("%" if ncb_applied else ""),
-        "NCB (prev policy)": ncb_prev + ("%" if ncb_prev else ""),
         "Source File": "",  # filled in by caller
     }
 

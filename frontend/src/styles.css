@@ -51,9 +51,8 @@ body {
 }
 
 .app {
-  max-width: 1180px;
-  margin: 0 auto;
-  padding: 28px 22px 60px;
+  width: 100%;
+  padding: 28px 32px 60px;
 }
 
 /* Topbar */
@@ -287,15 +286,43 @@ th {
 }
 td .cell {
   width: 100%;
-  min-width: 130px;
+  min-width: 120px;
   background: transparent;
   border: none;
   color: var(--text);
   padding: 9px 12px;
   font-size: 12.5px;
   outline: none;
+  font-family: inherit;
+}
+td input.cell { white-space: nowrap; }
+td textarea.cell {
+  field-sizing: content;
+  resize: none;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: hidden;
+  display: block;
 }
 td .cell:focus { background: var(--cell-focus); }
+
+/* Amount columns */
+.col-amount { text-align: right; }
+.col-amount .cell-amount {
+  text-align: right;
+  min-width: 110px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Date columns */
+.col-date { text-align: center; }
+.col-date .cell-date {
+  text-align: center;
+  min-width: 76px;
+}
+
+
 .rownum { width: 38px; text-align: center; color: var(--muted); padding: 9px 8px; }
 tbody tr:hover td { background: var(--cell-focus); }
 

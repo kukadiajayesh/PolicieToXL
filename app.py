@@ -7,7 +7,7 @@ to a local path you choose. Serves the prebuilt React UI from ./frontend/dist.
 
 Run:
     python app.py
-Then open http://127.0.0.1:5000 in your browser.
+Then open http://127.0.0.1:5001 in your browser.
 """
 
 import os
@@ -27,14 +27,13 @@ DIST_DIR = os.path.join(BASE_DIR, "frontend", "dist")
 COLUMNS = [
     "Party Name",
     "Insurance Company",
+    "Policy No.",
     "Reg Number",
     "Type of Insurance",
-    "Premium without GST",
-    "Premium with GST",
+    "Premium",
     "Date Start",
     "End Date",
     "NCB (applied this yr)",
-    "NCB (prev policy)",
     "Source File",
 ]
 
@@ -161,5 +160,5 @@ def export():
 
 
 if __name__ == "__main__":
-    print("Insurance PDF extractor running at http://127.0.0.1:5000")
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    print("Insurance PDF extractor running at http://127.0.0.1:5001")
+    app.run(host="127.0.0.1", port=5001, debug=False)

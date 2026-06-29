@@ -1,16 +1,60 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+const AMOUNT_COLS = new Set(["Premium"]);
+const DATE_COLS = new Set(["Date Start", "End Date"]);
+const CAMEL_COLS = new Set(["Party Name", "Type of Insurance"]);
+
+const MONTH_MAP = { jan:0, feb:1, mar:2, apr:3, may:4, jun:5, jul:6, aug:7, sep:8, oct:9, nov:10, dec:11 };
+
+function formatAmount(val) {
+  if (val == null || val === "") return "";
+  const clean = String(val).replace(/[₹,\s]/g, "").replace(/\.0+$/, "");
+  const num = parseFloat(clean);
+  if (isNaN(num)) return String(val);
+  return "₹" + Math.round(num).toLocaleString("en-IN");
+}
+
+function toTitleCase(val) {
+  if (!val) return val;
+  return String(val).toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function formatDate(val) {
+  if (val == null || val === "") return "";
+  const s = String(val).trim();
+  let d = null;
+  let m;
+
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2})$/);
+  if (m) { const yr = +m[3] < 50 ? 2000 + +m[3] : 1900 + +m[3]; d = new Date(yr, +m[2]-1, +m[1]); }
+
+  if (!d) { m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); if (m) d = new Date(+m[3], +m[2]-1, +m[1]); }
+
+  if (!d) { m = s.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/i); if (m) d = new Date(+m[3], MONTH_MAP[m[2].toLowerCase()], +m[1]); }
+
+  if (!d) { m = s.match(/^(\d{1,2})\s+([A-Za-z]{3}),?\s+(\d{4})$/i); if (m) d = new Date(+m[3], MONTH_MAP[m[2].toLowerCase()], +m[1]); }
+
+  if (!d) { m = s.match(/^([A-Za-z]{3})\s+(\d{1,2}),?\s+(\d{4})$/i); if (m) d = new Date(+m[3], MONTH_MAP[m[1].toLowerCase()], +m[2]); }
+
+  if (!d) { m = s.match(/^(\d{1,2})\s+([A-Za-z]{3})\s+'(\d{2})$/i); if (m) d = new Date(2000 + +m[3], MONTH_MAP[m[2].toLowerCase()], +m[1]); }
+
+  if (!d || isNaN(d.getTime())) return s;
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth()+1).padStart(2, "0");
+  const yy = String(d.getFullYear()).slice(-2);
+  return `${dd}/${mm}/${yy}`;
+}
+
 const COLUMNS = [
   "Party Name",
   "Insurance Company",
+  "Policy No.",
   "Reg Number",
   "Type of Insurance",
-  "Premium without GST",
-  "Premium with GST",
+  "Premium",
   "Date Start",
   "End Date",
   "NCB (applied this yr)",
-  "NCB (prev policy)",
   "Source File",
 ];
 
@@ -443,15 +487,41 @@ export default function App() {
                 {rows.map((row, i) => (
                   <tr key={i}>
                     <td className="rownum">{i + 1}</td>
-                    {COLUMNS.map((c) => (
-                      <td key={c}>
-                        <input
-                          className="cell"
-                          value={row[c] ?? ""}
-                          onChange={(e) => editCell(i, c, e.target.value)}
-                        />
-                      </td>
-                    ))}
+                    {COLUMNS.map((c) => {
+                      const raw = row[c] ?? "";
+                      if (AMOUNT_COLS.has(c)) {
+                        return (
+                          <td key={c} className="col-amount">
+                            <input
+                              className="cell cell-amount"
+                              value={formatAmount(raw)}
+                              onChange={(e) => editCell(i, c, e.target.value)}
+                            />
+                          </td>
+                        );
+                      }
+                      if (DATE_COLS.has(c)) {
+                        return (
+                          <td key={c} className="col-date">
+                            <input
+                              className="cell cell-date"
+                              value={formatDate(raw)}
+                              onChange={(e) => editCell(i, c, e.target.value)}
+                            />
+                          </td>
+                        );
+                      }
+                      return (
+                        <td key={c}>
+                          <textarea
+                            className="cell"
+                            value={CAMEL_COLS.has(c) ? toTitleCase(raw) : raw}
+                            onChange={(e) => editCell(i, c, e.target.value)}
+                            rows={1}
+                          />
+                        </td>
+                      );
+                    })}
                     <td>
                       <button className="x" onClick={() => deleteRow(i)} title="Delete row">
                         ×

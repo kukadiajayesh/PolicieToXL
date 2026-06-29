@@ -36,7 +36,7 @@ cd frontend && npm install && npm run build && cd ..
 python3 app.py
 ```
 
-Then open **http://127.0.0.1:5000**.
+Then open **http://127.0.0.1:5001**.
 
 ## Using the UI
 
@@ -52,8 +52,8 @@ Then open **http://127.0.0.1:5000**.
 ## Develop the UI with hot reload
 
 ```bash
-python3 app.py            # backend on :5000
-cd frontend && npm run dev   # UI on :5173, proxies /api to :5000
+python3 app.py            # backend on :5001
+cd frontend && npm run dev   # UI on :5173, proxies /api to :5001
 ```
 
 ## Note on extraction accuracy
@@ -65,6 +65,6 @@ those fields by hand, and you can extend the regexes per insurer over time.
 
 ## Fields extracted
 
-Party Name · Insurance Company · Reg Number · Type of Insurance ·
-Premium without GST · Premium with GST · Start Date · End Date ·
-NCB (this year) · NCB (previous policy) · Source File
+Party Name · Insurance Company · Policy No. · Reg Number · Type of Insurance ·
+Premium · Start Date · End Date ·
+NCB (applied this yr) · Source File
