@@ -26,11 +26,40 @@ try:
 except ImportError:
     _REQUESTS_OK = False
 
-OLLAMA_URL = "http://localhost:11434"
+def _env_int(name: str, default: int) -> int:
+    """Read an int from the environment, falling back to default on anything invalid."""
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_ollama_url(raw: str) -> str:
+    """Normalise an Ollama endpoint.
+
+    Ollama's own OLLAMA_HOST convention allows a bare ``host:port`` (no scheme)
+    and we want to tolerate a trailing slash, so coerce both into a clean base URL.
+    """
+    url = (raw or "").strip().rstrip("/")
+    if not url:
+        url = "http://localhost:11434"
+    if not re.match(r"^https?://", url):
+        url = "http://" + url
+    return url
+
+
+# Ollama base URL — honours the standard OLLAMA_HOST / OLLAMA_URL env vars so the
+# server can live on another host or port.
+OLLAMA_URL = _normalize_ollama_url(os.environ.get("OLLAMA_HOST") or os.environ.get("OLLAMA_URL"))
 # Max characters of PDF text sent to the LLM (keeps prompts fast).
 _OLLAMA_MAX_CHARS = 8000
 # Below this many characters we consider the text layer "poor" and try vision.
 _MIN_TEXT_CHARS = 200
+# Network timeouts (seconds) and the vision page cap — all overridable via env.
+_OLLAMA_TIMEOUT = _env_int("OLLAMA_TIMEOUT", 180)
+_OLLAMA_VISION_TIMEOUT = _env_int("OLLAMA_VISION_TIMEOUT", 300)
+_OLLAMA_STATUS_TIMEOUT = _env_int("OLLAMA_STATUS_TIMEOUT", 5)
+_OLLAMA_VISION_MAX_PAGES = _env_int("OLLAMA_VISION_MAX_PAGES", 5)
 
 _EXTRACT_PROMPT = """\
 You are an insurance document parser. Extract the following fields from the \
@@ -75,8 +104,66 @@ def _is_text_poor(text: str) -> bool:
     return len(text.strip()) < _MIN_TEXT_CHARS
 
 
-def pdf_pages_to_b64(pdf_path: str) -> list[str]:
-    """Render each PDF page to a base64-encoded PNG (requires pymupdf)."""
+# Canonical field order for an extracted policy row (excludes the Source File,
+# which the caller fills in). Shared by the regex and LLM extraction paths.
+_LLM_FIELDS = (
+    "Party Name",
+    "Insurance Company",
+    "Policy No.",
+    "Reg Number",
+    "Type of Insurance",
+    "Premium",
+    "Date Start",
+    "End Date",
+    "NCB (applied this yr)",
+)
+
+
+def _parse_llm_json(raw: str) -> dict:
+    """Best-effort parse of an LLM response into a dict.
+
+    Even with ``"format": "json"`` a model can wrap its answer in markdown fences
+    or add stray prose, so we strip fences and fall back to the first ``{...}``
+    block. Returns ``{}`` (never raises) when nothing parseable is found, and
+    drops any non-object payload (lists, strings, numbers).
+    """
+    if not raw or not raw.strip():
+        return {}
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[A-Za-z0-9]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if not m:
+            logger.warning("Could not locate JSON in Ollama response")
+            return {}
+        try:
+            data = json.loads(m.group(0))
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("Ollama response was not valid JSON")
+            return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _normalize_llm_fields(fields: dict) -> dict:
+    """Coerce a raw LLM dict into the canonical row: every key present, clean strings."""
+    row = {}
+    for key in _LLM_FIELDS:
+        val = fields.get(key, "")
+        row[key] = "" if val is None else str(val).strip()
+    row["Source File"] = ""  # filled in by caller
+    return row
+
+
+def pdf_pages_to_b64(pdf_path: str, max_pages: int | None = None) -> list[str]:
+    """Render PDF pages to base64-encoded PNGs (requires pymupdf).
+
+    ``max_pages`` caps how many leading pages are rendered so a long document
+    can't balloon the vision request payload or blow the timeout.
+    """
     try:
         import fitz  # PyMuPDF
     except ImportError:
@@ -84,19 +171,69 @@ def pdf_pages_to_b64(pdf_path: str) -> list[str]:
             "pymupdf is required for vision extraction. Install it with: pip install pymupdf"
         )
     doc = fitz.open(pdf_path)
-    images = []
-    for page in doc:
-        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2× zoom ≈ 144 dpi
-        images.append(base64.b64encode(pix.tobytes("png")).decode())
-    doc.close()
+    try:
+        images = []
+        for i, page in enumerate(doc):
+            if max_pages is not None and i >= max_pages:
+                break
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2× zoom ≈ 144 dpi
+            images.append(base64.b64encode(pix.tobytes("png")).decode())
+    finally:
+        doc.close()
     return images
+
+
+def _ollama_generate(payload: dict, url: str, timeout: int) -> dict:
+    """POST to Ollama's /api/generate and return a normalized field dict.
+
+    Translates the noisy failure modes (server down, slow model, bad model name,
+    HTML error page, malformed JSON) into clear ``RuntimeError`` messages so the
+    UI can show something actionable instead of a raw stack trace.
+    """
+    if not _REQUESTS_OK:
+        raise RuntimeError("requests library is required for Ollama extraction")
+    try:
+        r = _requests.post(f"{url}/api/generate", json=payload, timeout=timeout)
+        r.raise_for_status()
+    except _requests.exceptions.ConnectionError:
+        raise RuntimeError(
+            f"Cannot reach Ollama at {url}. Is it running? Start it with `ollama serve`."
+        )
+    except _requests.exceptions.Timeout:
+        raise RuntimeError(
+            f"Ollama did not respond within {timeout}s. Try a smaller/faster model."
+        )
+    except _requests.exceptions.HTTPError as exc:
+        detail = ""
+        try:
+            detail = r.json().get("error", "")
+        except ValueError:
+            detail = (r.text or "").strip()[:200]
+        raise RuntimeError(f"Ollama request failed: {detail or exc}")
+    except _requests.exceptions.RequestException as exc:
+        raise RuntimeError(f"Ollama request failed: {exc}")
+
+    try:
+        body = r.json()
+    except ValueError:
+        raise RuntimeError("Ollama returned a non-JSON response.")
+    if isinstance(body, dict) and body.get("error"):
+        raise RuntimeError(f"Ollama error: {body['error']}")
+
+    raw = body.get("response", "") if isinstance(body, dict) else ""
+    logger.info("=== Ollama response ===\n%s", raw)
+    return _normalize_llm_fields(_parse_llm_json(raw))
 
 
 def extract_fields_ollama_vision(pdf_path: str, model: str, url: str = OLLAMA_URL) -> dict:
     """Use a vision-capable Ollama model to extract fields directly from PDF images."""
     if not _REQUESTS_OK:
         raise RuntimeError("requests library is required for Ollama extraction")
-    images = pdf_pages_to_b64(pdf_path)
+    if not model:
+        raise ValueError("No Ollama model specified")
+    images = pdf_pages_to_b64(pdf_path, max_pages=_OLLAMA_VISION_MAX_PAGES)
+    if not images:
+        raise RuntimeError("No pages could be rendered from the PDF for vision extraction")
     payload = {
         "model": model,
         "prompt": _VISION_PROMPT,
@@ -105,23 +242,7 @@ def extract_fields_ollama_vision(pdf_path: str, model: str, url: str = OLLAMA_UR
         "format": "json",
     }
     logger.info("=== Ollama vision: %d page(s) -> %s ===", len(images), model)
-    r = _requests.post(f"{url}/api/generate", json=payload, timeout=300)
-    r.raise_for_status()
-    raw = r.json().get("response", "{}")
-    logger.info("=== Ollama vision response ===\n%s", raw)
-    fields = json.loads(raw)
-    return {
-        "Party Name": fields.get("Party Name", ""),
-        "Insurance Company": fields.get("Insurance Company", ""),
-        "Policy No.": fields.get("Policy No.", ""),
-        "Reg Number": fields.get("Reg Number", ""),
-        "Type of Insurance": fields.get("Type of Insurance", ""),
-        "Premium": str(fields.get("Premium", "")),
-        "Date Start": fields.get("Date Start", ""),
-        "End Date": fields.get("End Date", ""),
-        "NCB (applied this yr)": fields.get("NCB (applied this yr)", ""),
-        "Source File": "",
-    }
+    return _ollama_generate(payload, url, _OLLAMA_VISION_TIMEOUT)
 
 
 def read_text(pdf_path: str) -> str:
@@ -135,9 +256,23 @@ def read_text(pdf_path: str) -> str:
 
 
 def first(pattern, text, group=1, flags=re.IGNORECASE):
-    """Return the first regex match (a stripped string) or '' if none."""
-    m = re.search(pattern, text, flags)
-    return m.group(group).strip() if m else ""
+    """Return the first regex match (a stripped string) or '' if none.
+
+    Defensive on purpose: a malformed pattern or a missing capture group returns
+    '' (with a warning) rather than aborting extraction of every other field.
+    """
+    try:
+        m = re.search(pattern, text, flags)
+    except re.error:
+        logger.warning("Skipping invalid regex pattern: %r", pattern)
+        return ""
+    if not m:
+        return ""
+    try:
+        val = m.group(group)
+    except (IndexError, re.error):
+        return ""
+    return val.strip() if val else ""
 
 
 def ollama_status(url: str = OLLAMA_URL) -> dict:
@@ -145,9 +280,9 @@ def ollama_status(url: str = OLLAMA_URL) -> dict:
     if not _REQUESTS_OK:
         return {"ok": False, "error": "requests library not installed"}
     try:
-        r = _requests.get(f"{url}/api/tags", timeout=5)
+        r = _requests.get(f"{url}/api/tags", timeout=_OLLAMA_STATUS_TIMEOUT)
         r.raise_for_status()
-        models = [m["name"] for m in r.json().get("models", [])]
+        models = [m.get("name") for m in r.json().get("models", []) if m.get("name")]
         return {"ok": True, "models": models}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
@@ -157,26 +292,12 @@ def extract_fields_ollama(text: str, model: str, url: str = OLLAMA_URL) -> dict:
     """Ask a local Ollama model to extract policy fields and return a dict."""
     if not _REQUESTS_OK:
         raise RuntimeError("requests library is required for Ollama extraction")
-    prompt = _EXTRACT_PROMPT.format(text=text[:_OLLAMA_MAX_CHARS])
+    if not model:
+        raise ValueError("No Ollama model specified")
+    prompt = _EXTRACT_PROMPT.format(text=(text or "")[:_OLLAMA_MAX_CHARS])
     logger.info("=== Ollama prompt ===\n%s", prompt)
     payload = {"model": model, "prompt": prompt, "stream": False, "format": "json"}
-    r = _requests.post(f"{url}/api/generate", json=payload, timeout=180)
-    r.raise_for_status()
-    raw = r.json().get("response", "{}")
-    logger.info("=== Ollama response ===\n%s", raw)
-    fields = json.loads(raw)
-    return {
-        "Party Name": fields.get("Party Name", ""),
-        "Insurance Company": fields.get("Insurance Company", ""),
-        "Policy No.": fields.get("Policy No.", ""),
-        "Reg Number": fields.get("Reg Number", ""),
-        "Type of Insurance": fields.get("Type of Insurance", ""),
-        "Premium": str(fields.get("Premium", "")),
-        "Date Start": fields.get("Date Start", ""),
-        "End Date": fields.get("End Date", ""),
-        "NCB (applied this yr)": fields.get("NCB (applied this yr)", ""),
-        "Source File": "",
-    }
+    return _ollama_generate(payload, url, _OLLAMA_TIMEOUT)
 
 
 def extract_fields(text: str) -> dict:
@@ -214,10 +335,14 @@ def extract_fields(text: str) -> dict:
 
     # ── INSURANCE COMPANY ────────────────────────────────────────────────
     # Case-sensitive [A-Z] start avoids broker names (e.g. "probus insurance…")
-    # Handles both Title Case and ALL CAPS variants of Insurance/Limited
+    # Handles both Title Case and ALL CAPS variants of Insurance/Limited.
+    # The {1,80} / {1,40} bounds are deliberate: these two overlapping char-class
+    # runs straddle the required "insurance"/"assurance" literal and are the only
+    # spot here where unbounded quantifiers could backtrack badly on a long line.
+    # The caps are generous (insurer names are short) so real matches are intact.
     insurer = first(
-        r"([A-Z][A-Za-z& ]+ (?:[Ii]nsurance|INSURANCE|[Aa]ssurance|ASSURANCE)"
-        r"(?:[A-Za-z ]+?)?(?:[Cc]ompany |COMPANY )?(?:[Ll]imited|LIMITED|[Ll]td|LTD))",
+        r"([A-Z][A-Za-z& ]{1,80} (?:[Ii]nsurance|INSURANCE|[Aa]ssurance|ASSURANCE)"
+        r"(?:[A-Za-z ]{1,40}?)?(?:[Cc]ompany |COMPANY )?(?:[Ll]imited|LIMITED|[Ll]td|LTD))",
         text,
         flags=0,
     )
@@ -324,6 +449,76 @@ def extract_fields(text: str) -> dict:
         "NCB (applied this yr)": ncb_applied + ("%" if ncb_applied else ""),
         "Source File": "",  # filled in by caller
     }
+
+
+def _norm_token(s: str) -> str:
+    """Lowercase and strip everything but alphanumerics (for fuzzy matching)."""
+    return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+
+def locate_fields(pdf_path: str, fields: dict, min_len: int = 3) -> dict:
+    """Find where each extracted field value sits on the page.
+
+    For every non-empty value we normalise it (drop spaces/punctuation/case) and
+    search the normalised stream of words on each page. The bounding box of the
+    matching words is returned so the UI can render a zoomed, highlighted crop of
+    the source PDF for verification.
+
+    Returns {field_name: {"page": int, "bbox": [x0, top, x1, bottom]}}; fields
+    that can't be located (or are too short to match unambiguously) are omitted.
+    Coordinates are in PDF points with a top-left origin (pdfplumber convention).
+    """
+    targets = {}
+    for key, val in fields.items():
+        if key == "Source File" or not val:
+            continue
+        norm = _norm_token(val)
+        if len(norm) >= min_len:
+            targets[key] = norm
+    if not targets:
+        return {}
+
+    found: dict = {}
+    with pdfplumber.open(pdf_path) as pdf:
+        for page_no, page in enumerate(pdf.pages):
+            words = page.extract_words()
+            if not words:
+                continue
+            # Concatenate all normalised words on the page, remembering which
+            # character range each word occupies so we can map a match back to
+            # the words (and therefore the bounding boxes) that produced it.
+            concat = ""
+            spans = []  # (start, end, word_index)
+            for wi, w in enumerate(words):
+                nw = _norm_token(w["text"])
+                if not nw:
+                    continue
+                start = len(concat)
+                concat += nw
+                spans.append((start, len(concat), wi))
+
+            for key, norm in targets.items():
+                if key in found:
+                    continue
+                pos = concat.find(norm)
+                if pos < 0:
+                    continue
+                end = pos + len(norm)
+                hits = [wi for (s, e, wi) in spans if s < end and e > pos]
+                if not hits:
+                    continue
+                found[key] = {
+                    "page": page_no,
+                    "bbox": [
+                        min(words[i]["x0"] for i in hits),
+                        min(words[i]["top"] for i in hits),
+                        max(words[i]["x1"] for i in hits),
+                        max(words[i]["bottom"] for i in hits),
+                    ],
+                }
+            if len(found) == len(targets):
+                break
+    return found
 
 
 def main():

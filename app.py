@@ -14,12 +14,16 @@ import os
 import io
 import sys
 import glob
+import uuid
 import queue
+import atexit
+import shutil
 import logging
 import tempfile
 import threading
 import subprocess
 import collections
+from functools import lru_cache
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,11 +58,15 @@ logging.getLogger().addHandler(_ui_handler)
 from flask import Flask, request, jsonify, send_from_directory, send_file, Response, stream_with_context
 import pandas as pd
 
+import pypdfium2 as pdfium
+from PIL import Image, ImageDraw
+
 from extract_policies import (
     read_text,
     extract_fields,
     extract_fields_ollama,
     extract_fields_ollama_vision,
+    locate_fields,
     _is_text_poor,
     ollama_status,
 )
@@ -82,6 +90,89 @@ COLUMNS = [
     "NCB (applied this yr)",
     "Source File",
 ]
+
+# ── PDF preview cache ───────────────────────────────────────────────────────
+# To render hover previews we must keep the source PDFs reachable for the life
+# of the process. Uploaded files are copied into this temp dir; folder-scanned
+# files are referenced in place. A doc_id keeps real paths out of the URL/API.
+_DOC_DIR = tempfile.mkdtemp(prefix="pdfxl_docs_")
+_DOC_REGISTRY: dict[str, str] = {}
+_DOC_LOCK = threading.Lock()
+# Don't leave copies of uploaded PDFs behind when the app closes.
+atexit.register(lambda: shutil.rmtree(_DOC_DIR, ignore_errors=True))
+
+# Preview render settings (PDF points → pixels).
+_PREVIEW_SCALE = 3.0   # render resolution
+_PREVIEW_PAD_X = 70    # context kept left/right of the value, in points
+_PREVIEW_PAD_Y = 26    # context kept above/below the value, in points
+
+
+def _register_doc(src_path: str, copy: bool) -> str:
+    """Register a PDF for later preview and return its doc_id."""
+    doc_id = uuid.uuid4().hex
+    if copy:
+        dst = os.path.join(_DOC_DIR, doc_id + ".pdf")
+        shutil.copyfile(src_path, dst)
+        path = dst
+    else:
+        path = os.path.abspath(src_path)
+    with _DOC_LOCK:
+        _DOC_REGISTRY[doc_id] = path
+    return doc_id
+
+
+def _augment_row(row: dict, pdf_path: str, copy: bool) -> dict:
+    """Attach a doc_id and per-field source locations for the hover preview."""
+    doc_id = _register_doc(pdf_path, copy=copy)
+    try:
+        locations = locate_fields(pdf_path, row)
+    except Exception as exc:  # noqa: BLE001 — preview is best-effort
+        logger.warning("Field location failed for %s: %s", row.get("Source File"), exc)
+        locations = {}
+    row["_doc_id"] = doc_id
+    row["_locations"] = locations
+    return row
+
+
+@lru_cache(maxsize=8)
+def _render_page(doc_id: str, page_no: int) -> Image.Image:
+    """Render a full PDF page to a PIL image (cached; treat result as read-only)."""
+    with _DOC_LOCK:
+        path = _DOC_REGISTRY.get(doc_id)
+    if not path:
+        raise KeyError(doc_id)
+    pdf = pdfium.PdfDocument(path)
+    try:
+        return pdf[page_no].render(scale=_PREVIEW_SCALE).to_pil().convert("RGB")
+    finally:
+        pdf.close()
+
+
+def _render_crop(doc_id: str, page_no: int, bbox) -> bytes:
+    """Return PNG bytes of a zoomed, highlighted crop around bbox (PDF points)."""
+    x0, top, x1, bottom = bbox
+    page = _render_page(doc_id, page_no)
+    s = _PREVIEW_SCALE
+    cx0 = max(0, int((x0 - _PREVIEW_PAD_X) * s))
+    cy0 = max(0, int((top - _PREVIEW_PAD_Y) * s))
+    cx1 = min(page.width, int((x1 + _PREVIEW_PAD_X) * s))
+    cy1 = min(page.height, int((bottom + _PREVIEW_PAD_Y) * s))
+    crop = page.crop((cx0, cy0, cx1, cy1)).convert("RGBA")
+
+    overlay = Image.new("RGBA", crop.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    draw.rectangle(
+        [x0 * s - cx0 - 2, top * s - cy0 - 2, x1 * s - cx0 + 2, bottom * s - cy0 + 2],
+        fill=(255, 214, 0, 70),
+        outline=(240, 150, 0, 255),
+        width=2,
+    )
+    out = Image.alpha_composite(crop, overlay).convert("RGB")
+    buf = io.BytesIO()
+    out.save(buf, "PNG")
+    buf.seek(0)
+    return buf.getvalue()
+# ────────────────────────────────────────────────────────────────────────────
 
 app = Flask(__name__, static_folder=None)
 
@@ -148,7 +239,7 @@ def _do_extract(path: str, text: str, engine: str, model: str) -> dict:
 def _extract_one(path, engine="regex", model=""):
     row = _do_extract(path, read_text(path), engine, model)
     row["Source File"] = os.path.basename(path)
-    return row
+    return _augment_row(row, path, copy=False)
 
 
 @app.route("/api/ollama/status", methods=["GET"])
@@ -179,7 +270,8 @@ def extract():
             text = read_text(tmp_path)
             row = _do_extract(tmp_path, text, engine, model)
             row["Source File"] = name
-            return jsonify({"row": row})
+            # copy=True keeps a copy alive for previews after the temp is removed
+            return jsonify({"row": _augment_row(row, tmp_path, copy=True)})
         except Exception as e:  # noqa: BLE001
             return jsonify({"error": str(e), "source": name}), 500
         finally:
@@ -196,6 +288,35 @@ def extract():
         return jsonify({"row": _extract_one(path, engine, model)})
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": str(e), "source": os.path.basename(path)}), 500
+
+
+@app.route("/api/preview", methods=["GET"])
+def preview():
+    """Render a zoomed, highlighted crop of the source PDF for one field.
+
+    Query params: doc_id, page, x0, top, x1, bottom (the located bounding box).
+    Returns a PNG so the UI can show it in a hover popover for verification.
+    """
+    doc_id = request.args.get("doc_id", "")
+    with _DOC_LOCK:
+        path = _DOC_REGISTRY.get(doc_id)
+    if not path or not os.path.isfile(path):
+        return jsonify({"error": "Unknown document."}), 404
+    try:
+        page_no = int(request.args.get("page", "0"))
+        bbox = (
+            float(request.args["x0"]),
+            float(request.args["top"]),
+            float(request.args["x1"]),
+            float(request.args["bottom"]),
+        )
+    except (KeyError, ValueError):
+        return jsonify({"error": "Bad preview parameters."}), 400
+    try:
+        png = _render_crop(doc_id, page_no, bbox)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": str(e)}), 500
+    return send_file(io.BytesIO(png), mimetype="image/png")
 
 
 @app.route("/api/export", methods=["POST"])

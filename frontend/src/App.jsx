@@ -92,9 +92,11 @@ export default function App() {
   const [ollamaError, setOllamaError] = useState("");
   const [logs, setLogs] = useState([]);
   const [logsOpen, setLogsOpen] = useState(false);
+  const [preview, setPreview] = useState(null); // {url, x, y, col, loading}
   const fileInput = useRef(null);
   const folderInput = useRef(null);
   const logsEndRef = useRef(null);
+  const hoverTimer = useRef(null);
 
   useEffect(() => {
     localStorage.setItem("theme", theme);
@@ -313,6 +315,51 @@ export default function App() {
     }
   };
 
+  // ── PDF hover preview ──────────────────────────────────────────────────
+  // A located field carries {page, bbox}. On hover we show a zoomed, highlighted
+  // crop of the source PDF so the user can verify the extracted value at a glance.
+  const previewUrl = (row, loc) => {
+    const [x0, top, x1, bottom] = loc.bbox;
+    const q = new URLSearchParams({ doc_id: row._doc_id, page: loc.page, x0, top, x1, bottom });
+    return `/api/preview?${q.toString()}`;
+  };
+
+  const clampPoint = (x, y) => ({
+    // popover is ~380×260; nudge it back inside the viewport near the edges
+    x: Math.min(x + 18, window.innerWidth - 396),
+    y: Math.min(y + 18, window.innerHeight - 272),
+  });
+
+  const showPreview = (e, row, col) => {
+    const loc = row._locations?.[col];
+    if (!row._doc_id || !loc) return;
+    const url = previewUrl(row, loc);
+    const { x, y } = clampPoint(e.clientX, e.clientY);
+    clearTimeout(hoverTimer.current);
+    hoverTimer.current = setTimeout(
+      () => setPreview({ url, x, y, col, loading: true }),
+      220
+    );
+  };
+
+  const movePreview = (e) => {
+    setPreview((p) => (p ? { ...p, ...clampPoint(e.clientX, e.clientY) } : p));
+  };
+
+  const hidePreview = () => {
+    clearTimeout(hoverTimer.current);
+    setPreview(null);
+  };
+
+  const cellHoverProps = (row, col) =>
+    row._doc_id && row._locations?.[col]
+      ? {
+          onMouseEnter: (e) => showPreview(e, row, col),
+          onMouseMove: movePreview,
+          onMouseLeave: hidePreview,
+        }
+      : {};
+
   const counts = useMemo(() => {
     const c = { pending: 0, reading: 0, done: 0, error: 0 };
     queue.forEach((it) => (c[it.status] = (c[it.status] || 0) + 1));
@@ -502,28 +549,37 @@ export default function App() {
                     <td className="rownum">{i + 1}</td>
                     {COLUMNS.map((c) => {
                       const raw = row[c] ?? "";
+                      const hasLoc = !!(row._doc_id && row._locations?.[c]);
+                      const verifyBadge = hasLoc ? (
+                        <span className="verify-badge" title="Hover to verify against the PDF">🔍</span>
+                      ) : null;
+                      const tdClass = (base) =>
+                        (base ? base + " " : "") + (hasLoc ? "has-loc" : "");
                       if (AMOUNT_COLS.has(c)) {
                         return (
-                          <td key={c} className="col-amount">
+                          <td key={c} className={tdClass("col-amount")} {...cellHoverProps(row, c)}>
                             <input className="cell cell-amount" value={formatAmount(raw)} onChange={(e) => editCell(i, c, e.target.value)} />
+                            {verifyBadge}
                           </td>
                         );
                       }
                       if (DATE_COLS.has(c)) {
                         return (
-                          <td key={c} className="col-date">
+                          <td key={c} className={tdClass("col-date")} {...cellHoverProps(row, c)}>
                             <input className="cell cell-date" value={formatDate(raw)} onChange={(e) => editCell(i, c, e.target.value)} />
+                            {verifyBadge}
                           </td>
                         );
                       }
                       return (
-                        <td key={c}>
+                        <td key={c} className={tdClass("")} {...cellHoverProps(row, c)}>
                           <textarea
                             className="cell"
                             value={CAMEL_COLS.has(c) ? toTitleCase(raw) : raw}
                             onChange={(e) => editCell(i, c, e.target.value)}
                             rows={1}
                           />
+                          {verifyBadge}
                         </td>
                       );
                     })}
@@ -555,6 +611,26 @@ export default function App() {
           </div>
         )}
       </section>
+
+      {preview && (
+        <div className="pdf-preview-pop" style={{ left: preview.x, top: preview.y }}>
+          <div className="pdf-preview-cap">
+            <span className="pdf-preview-zoom">🔍</span>
+            <span>{preview.col} — from PDF</span>
+          </div>
+          <div className="pdf-preview-frame">
+            {preview.loading && <div className="pdf-preview-spinner">Loading…</div>}
+            <img
+              src={preview.url}
+              alt={`PDF source for ${preview.col}`}
+              className="pdf-preview-img"
+              onLoad={() => setPreview((p) => (p ? { ...p, loading: false } : p))}
+              onError={() => setPreview((p) => (p ? { ...p, loading: false, failed: true } : p))}
+            />
+            {preview.failed && <div className="pdf-preview-spinner">Preview unavailable</div>}
+          </div>
+        </div>
+      )}
 
       {toast && <div className={"toast " + toast.kind}>{toast.msg}</div>}
     </div>
