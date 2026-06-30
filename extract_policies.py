@@ -6,17 +6,122 @@ policy to an Excel file. Everything runs locally — no internet, no upload.
 
 Usage:
     python extract_policies.py /path/to/folder_of_pdfs   output.xlsx
-
-This is the RULE-BASED version, tuned for the HDFC ERGO layout. See the notes
-at the bottom for how to make it handle ANY insurer using a local LLM.
 """
 
 import sys
 import re
 import os
 import glob
+import json
+import base64
+import logging
 import pdfplumber
 import pandas as pd
+
+logger = logging.getLogger(__name__)
+
+try:
+    import requests as _requests
+    _REQUESTS_OK = True
+except ImportError:
+    _REQUESTS_OK = False
+
+OLLAMA_URL = "http://localhost:11434"
+# Max characters of PDF text sent to the LLM (keeps prompts fast).
+_OLLAMA_MAX_CHARS = 8000
+# Below this many characters we consider the text layer "poor" and try vision.
+_MIN_TEXT_CHARS = 200
+
+_EXTRACT_PROMPT = """\
+You are an insurance document parser. Extract the following fields from the \
+policy document text below and return ONLY a valid JSON object — no markdown, \
+no explanation, just the JSON.
+
+Required keys (use "" if not found):
+  "Party Name"          – full name of the insured person or entity
+  "Insurance Company"   – full legal name of the insurer
+  "Policy No."          – policy number / ID
+  "Reg Number"          – vehicle registration number (e.g. MH01AB1234)
+  "Type of Insurance"   – policy type (e.g. Comprehensive, Third Party, etc.)
+  "Premium"             – total premium including GST, digits only (no ₹ or commas)
+  "Date Start"          – policy start date in DD/MM/YYYY
+  "End Date"            – policy end date in DD/MM/YYYY
+  "NCB (applied this yr)" – no-claim bonus % applied this year (e.g. "25%")
+
+Document text:
+{text}
+"""
+
+_VISION_PROMPT = """\
+You are an insurance document parser. Look at this insurance policy document \
+image and extract the following fields. Return ONLY a valid JSON object — no \
+markdown, no explanation, just the JSON.
+
+Required keys (use "" if not found):
+  "Party Name"          – full name of the insured person or entity
+  "Insurance Company"   – full legal name of the insurer
+  "Policy No."          – policy number / ID
+  "Reg Number"          – vehicle registration number (e.g. MH01AB1234)
+  "Type of Insurance"   – policy type (e.g. Comprehensive, Third Party, etc.)
+  "Premium"             – total premium including GST, digits only (no ₹ or commas)
+  "Date Start"          – policy start date in DD/MM/YYYY
+  "End Date"            – policy end date in DD/MM/YYYY
+  "NCB (applied this yr)" – no-claim bonus % applied this year (e.g. "25%")
+"""
+
+
+def _is_text_poor(text: str) -> bool:
+    """Return True when pdfplumber extracted too little text to be useful."""
+    return len(text.strip()) < _MIN_TEXT_CHARS
+
+
+def pdf_pages_to_b64(pdf_path: str) -> list[str]:
+    """Render each PDF page to a base64-encoded PNG (requires pymupdf)."""
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        raise RuntimeError(
+            "pymupdf is required for vision extraction. Install it with: pip install pymupdf"
+        )
+    doc = fitz.open(pdf_path)
+    images = []
+    for page in doc:
+        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2× zoom ≈ 144 dpi
+        images.append(base64.b64encode(pix.tobytes("png")).decode())
+    doc.close()
+    return images
+
+
+def extract_fields_ollama_vision(pdf_path: str, model: str, url: str = OLLAMA_URL) -> dict:
+    """Use a vision-capable Ollama model to extract fields directly from PDF images."""
+    if not _REQUESTS_OK:
+        raise RuntimeError("requests library is required for Ollama extraction")
+    images = pdf_pages_to_b64(pdf_path)
+    payload = {
+        "model": model,
+        "prompt": _VISION_PROMPT,
+        "images": images,
+        "stream": False,
+        "format": "json",
+    }
+    logger.info("=== Ollama vision: %d page(s) -> %s ===", len(images), model)
+    r = _requests.post(f"{url}/api/generate", json=payload, timeout=300)
+    r.raise_for_status()
+    raw = r.json().get("response", "{}")
+    logger.info("=== Ollama vision response ===\n%s", raw)
+    fields = json.loads(raw)
+    return {
+        "Party Name": fields.get("Party Name", ""),
+        "Insurance Company": fields.get("Insurance Company", ""),
+        "Policy No.": fields.get("Policy No.", ""),
+        "Reg Number": fields.get("Reg Number", ""),
+        "Type of Insurance": fields.get("Type of Insurance", ""),
+        "Premium": str(fields.get("Premium", "")),
+        "Date Start": fields.get("Date Start", ""),
+        "End Date": fields.get("End Date", ""),
+        "NCB (applied this yr)": fields.get("NCB (applied this yr)", ""),
+        "Source File": "",
+    }
 
 
 def read_text(pdf_path: str) -> str:
@@ -33,6 +138,45 @@ def first(pattern, text, group=1, flags=re.IGNORECASE):
     """Return the first regex match (a stripped string) or '' if none."""
     m = re.search(pattern, text, flags)
     return m.group(group).strip() if m else ""
+
+
+def ollama_status(url: str = OLLAMA_URL) -> dict:
+    """Return {"ok": True, "models": [...]} or {"ok": False, "error": "..."}."""
+    if not _REQUESTS_OK:
+        return {"ok": False, "error": "requests library not installed"}
+    try:
+        r = _requests.get(f"{url}/api/tags", timeout=5)
+        r.raise_for_status()
+        models = [m["name"] for m in r.json().get("models", [])]
+        return {"ok": True, "models": models}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def extract_fields_ollama(text: str, model: str, url: str = OLLAMA_URL) -> dict:
+    """Ask a local Ollama model to extract policy fields and return a dict."""
+    if not _REQUESTS_OK:
+        raise RuntimeError("requests library is required for Ollama extraction")
+    prompt = _EXTRACT_PROMPT.format(text=text[:_OLLAMA_MAX_CHARS])
+    logger.info("=== Ollama prompt ===\n%s", prompt)
+    payload = {"model": model, "prompt": prompt, "stream": False, "format": "json"}
+    r = _requests.post(f"{url}/api/generate", json=payload, timeout=180)
+    r.raise_for_status()
+    raw = r.json().get("response", "{}")
+    logger.info("=== Ollama response ===\n%s", raw)
+    fields = json.loads(raw)
+    return {
+        "Party Name": fields.get("Party Name", ""),
+        "Insurance Company": fields.get("Insurance Company", ""),
+        "Policy No.": fields.get("Policy No.", ""),
+        "Reg Number": fields.get("Reg Number", ""),
+        "Type of Insurance": fields.get("Type of Insurance", ""),
+        "Premium": str(fields.get("Premium", "")),
+        "Date Start": fields.get("Date Start", ""),
+        "End Date": fields.get("End Date", ""),
+        "NCB (applied this yr)": fields.get("NCB (applied this yr)", ""),
+        "Source File": "",
+    }
 
 
 def extract_fields(text: str) -> dict:

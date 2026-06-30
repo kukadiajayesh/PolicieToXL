@@ -56,6 +56,68 @@ python3 app.py            # backend on :5001
 cd frontend && npm run dev   # UI on :5173, proxies /api to :5001
 ```
 
+## Ollama (AI extraction)
+
+The app supports a local LLM via [Ollama](https://ollama.com) as an alternative
+to the regex engine. Useful for PDFs from insurers not yet covered by the regex
+patterns.
+
+### 1. Install Ollama
+
+```bash
+# macOS / Linux
+curl -fsSL https://ollama.com/install.sh | sh
+
+# macOS (Homebrew)
+brew install ollama
+```
+
+### 2. Pull a model
+
+Text extraction (fast, low memory):
+
+```bash
+ollama pull llama3.2        # ~2 GB, good all-rounder
+ollama pull qwen2.5:7b      # slightly more accurate on structured data
+```
+
+Vision extraction (for scanned / image-only PDFs):
+
+```bash
+ollama pull llava:7b        # ~4 GB, multimodal
+ollama pull minicpm-v       # lighter alternative
+```
+
+### 3. Start Ollama
+
+```bash
+ollama serve
+```
+
+Ollama listens on `http://localhost:11434` by default. The app checks this
+endpoint automatically and shows a status indicator in the UI.
+
+### 4. Select Ollama in the UI
+
+In the extraction panel, switch the **Engine** toggle from *Regex* to *Ollama*
+and pick your model from the dropdown. Then extract as usual.
+
+**Vision fallback** — if a PDF has fewer than 200 characters of extractable
+text (scanned / image PDF), the app automatically retries using the vision API
+instead of the text API. A vision-capable model (`llava`, `minicpm-v`, etc.)
+must be installed for this to work; otherwise it falls back to the text prompt.
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| "Ollama not running" badge | `ollama serve` is not running — start it |
+| Empty model list | Pull at least one model: `ollama pull llama3.2` |
+| Timeout on large PDFs | Only the first 8 000 chars are sent; try a faster model |
+| Vision fails | Install `pymupdf`: `pip install pymupdf` |
+
+---
+
 ## Note on extraction accuracy
 
 The regex patterns in `extract_policies.py` are tuned for the **HDFC ERGO**

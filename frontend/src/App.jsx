@@ -76,10 +76,8 @@ const THEME_META = {
 };
 
 export default function App() {
-  // queue items: { id, name, path?, file?, status, error? }
   const [queue, setQueue] = useState([]);
-  const [rows, setRows] = useState([]); // extracted rows (editable)
-  const [folder, setFolder] = useState("");
+  const [rows, setRows] = useState([]);
   const [outputPath, setOutputPath] = useState("");
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState(null);
@@ -87,11 +85,17 @@ export default function App() {
   const [theme, setTheme] = useState(
     () => localStorage.getItem("theme") || "system"
   );
+  const [engine, setEngine] = useState("regex");
+  const [ollamaModels, setOllamaModels] = useState([]);
+  const [ollamaModel, setOllamaModel] = useState("");
+  const [ollamaStatus, setOllamaStatus] = useState(null); // null | "checking" | "ok" | "error"
+  const [ollamaError, setOllamaError] = useState("");
+  const [logs, setLogs] = useState([]);
+  const [logsOpen, setLogsOpen] = useState(false);
   const fileInput = useRef(null);
   const folderInput = useRef(null);
+  const logsEndRef = useRef(null);
 
-  // Apply the chosen theme (resolving "system" via the OS preference) and keep
-  // it in sync when the OS preference changes while on system mode.
   useEffect(() => {
     localStorage.setItem("theme", theme);
     const mql = window.matchMedia("(prefers-color-scheme: dark)");
@@ -110,8 +114,48 @@ export default function App() {
   const cycleTheme = () =>
     setTheme((t) => THEME_ORDER[(THEME_ORDER.indexOf(t) + 1) % THEME_ORDER.length]);
 
-  // Enable folder selection on the hidden input (non-standard attributes that
-  // JSX won't pass through reliably).
+  const checkOllama = async ({ setDefault = false } = {}) => {
+    setOllamaStatus("checking");
+    setOllamaError("");
+    try {
+      const res = await fetch("/api/ollama/status");
+      const data = await res.json();
+      if (data.ok) {
+        setOllamaModels(data.models || []);
+        setOllamaModel((m) => m || data.models?.[0] || "");
+        setOllamaStatus("ok");
+        if (setDefault) setEngine("ollama");
+      } else {
+        setOllamaStatus("error");
+        setOllamaError(data.error || "Ollama not reachable");
+      }
+    } catch {
+      setOllamaStatus("error");
+      setOllamaError("Could not reach Ollama");
+    }
+  };
+
+  // On mount: probe Ollama and default to it if available.
+  useEffect(() => { checkOllama({ setDefault: true }); }, []);
+
+  // SSE log stream
+  useEffect(() => {
+    const es = new EventSource("/api/logs");
+    es.onmessage = (e) => {
+      setLogs((l) => [...l.slice(-499), e.data]);
+    };
+    return () => es.close();
+  }, []);
+
+  // Auto-scroll log panel when open
+  useEffect(() => {
+    if (logsOpen) logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs, logsOpen]);
+
+  useEffect(() => {
+    if (engine === "ollama" && ollamaStatus === null) checkOllama();
+  }, [engine]);
+
   useEffect(() => {
     if (folderInput.current) {
       folderInput.current.setAttribute("webkitdirectory", "");
@@ -150,38 +194,6 @@ export default function App() {
     if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files);
   };
 
-  const scanFolder = async () => {
-    if (!folder.trim()) return flash("Enter a folder path first.", "error");
-    setBusy(true);
-    try {
-      const res = await fetch("/api/scan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ folder }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Scan failed");
-      if (!data.files.length) {
-        flash("No PDFs found in that folder.", "error");
-      } else {
-        setQueue((q) => [
-          ...q,
-          ...data.files.map((f) => ({
-            id: uid(),
-            name: f.name,
-            path: f.path,
-            status: "pending",
-          })),
-        ]);
-        flash(`Found ${data.files.length} PDF(s).`, "info");
-      }
-    } catch (err) {
-      flash(err.message, "error");
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const setItemStatus = (id, status, error) =>
     setQueue((q) =>
       q.map((it) => (it.id === id ? { ...it, status, error } : it))
@@ -194,12 +206,14 @@ export default function App() {
       if (item.file) {
         const fd = new FormData();
         fd.append("file", item.file, item.name);
+        fd.append("engine", engine);
+        if (engine === "ollama") fd.append("model", ollamaModel);
         res = await fetch("/api/extract", { method: "POST", body: fd });
       } else {
         res = await fetch("/api/extract", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: item.path }),
+          body: JSON.stringify({ path: item.path, engine, model: engine === "ollama" ? ollamaModel : "" }),
         });
       }
       const data = await res.json();
@@ -215,14 +229,11 @@ export default function App() {
     const pending = queue.filter((it) => it.status === "pending");
     if (!pending.length) return flash("Nothing pending to process.", "error");
     setBusy(true);
-    setRows([]); // fresh run
-    // reset any prior done/error back so the table matches the queue
+    setRows([]);
     setQueue((q) =>
       q.map((it) => (it.status === "done" || it.status === "error" ? { ...it, status: "pending", error: undefined } : it))
     );
-    // process sequentially so the user sees live progress
     for (const item of queue) {
-      // re-read latest pending list each loop is overkill; just process all
       await extractOne(item);
     }
     setBusy(false);
@@ -245,6 +256,16 @@ export default function App() {
 
   const deleteRow = (rowIdx) =>
     setRows((r) => r.filter((_, i) => i !== rowIdx));
+
+  const pickOutputPath = async () => {
+    try {
+      const res = await fetch("/api/pick_output", { method: "POST" });
+      const data = await res.json();
+      if (data.path) setOutputPath(data.path);
+    } catch {
+      flash("Could not open file picker.", "error");
+    }
+  };
 
   const saveToDisk = async () => {
     if (!rows.length) return flash("No results to export.", "error");
@@ -272,7 +293,7 @@ export default function App() {
       const res = await fetch("/api/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows }), // no path → stream download
+        body: JSON.stringify({ rows }),
       });
       if (!res.ok) {
         const data = await res.json();
@@ -302,7 +323,7 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <div className="logo">📄→📊</div>
+          <img src="/app-icon.png" className="logo-img" alt="App icon" />
           <div>
             <h1>Insurance Policy Extractor</h1>
             <p className="sub">Offline PDF → Excel. Nothing leaves your machine.</p>
@@ -321,148 +342,142 @@ export default function App() {
         </div>
       </header>
 
-      <section className="grid">
-        {/* Input card */}
-        <div className="card">
+      {/* Add PDFs section — full width */}
+      <section className="card add-section">
+        <div className="section-head">
           <h2>1 · Add policy PDFs</h2>
-
-          <label className="field-label">Browse your computer</label>
-          <div className="row gap-sm">
-            <button
-              className="btn"
-              onClick={() => folderInput.current?.click()}
-              disabled={busy}
-            >
-              📁 Browse folder
-            </button>
-            <button
-              className="btn"
-              onClick={() => fileInput.current?.click()}
-              disabled={busy}
-            >
-              📄 Browse files
-            </button>
-          </div>
-
-          <div
-            className={"dropzone" + (dragging ? " active" : "")}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDragging(true);
-            }}
-            onDragLeave={() => setDragging(false)}
-            onDrop={onDrop}
-            onClick={() => fileInput.current?.click()}
-          >
-            <div className="dz-icon">⬆</div>
-            <div>
-              <strong>Drag &amp; drop PDFs here</strong>
-              <div className="muted">or use the buttons above</div>
+          <div className="engine-bar">
+            <span className="engine-label">Engine:</span>
+            <div className="engine-toggle">
+              <button
+                className={"engine-btn" + (engine === "regex" ? " active" : "")}
+                onClick={() => setEngine("regex")}
+              >Regex</button>
+              <button
+                className={"engine-btn" + (engine === "ollama" ? " active" : "")}
+                onClick={() => setEngine("ollama")}
+              >Ollama</button>
             </div>
+            {engine === "ollama" && (
+              <div className="ollama-config">
+                {ollamaStatus === "checking" && <span className="muted">Checking…</span>}
+                {ollamaStatus === "error" && (
+                  <span className="ollama-err" title={ollamaError}>
+                    ✕ Not reachable
+                    <button className="retry-btn" onClick={checkOllama}>Retry</button>
+                  </span>
+                )}
+                {ollamaStatus === "ok" && ollamaModels.length === 0 && (
+                  <span className="muted">No models installed</span>
+                )}
+                {ollamaStatus === "ok" && ollamaModels.length > 0 && (
+                  <select
+                    className="model-select"
+                    value={ollamaModel}
+                    onChange={(e) => setOllamaModel(e.target.value)}
+                  >
+                    {ollamaModels.map((m) => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                )}
+              </div>
+            )}
           </div>
+        </div>
 
-          {/* hidden native pickers */}
-          <input
-            ref={fileInput}
-            type="file"
-            accept="application/pdf"
-            multiple
-            hidden
-            onChange={(e) => {
-              if (e.target.files) addFiles(e.target.files);
-              e.target.value = "";
-            }}
-          />
-          <input
-            ref={folderInput}
-            type="file"
-            hidden
-            onChange={(e) => {
-              if (e.target.files) addFiles(e.target.files);
-              e.target.value = "";
-            }}
-          />
-
-          <div className="or">or enter a folder path</div>
-
-          <div className="row">
-            <input
-              className="text-input"
-              placeholder="/path/to/folder_of_pdfs"
-              value={folder}
-              onChange={(e) => setFolder(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && scanFolder()}
-            />
-            <button className="btn" onClick={scanFolder} disabled={busy}>
-              Scan
+        <div
+          className={"dropzone" + (dragging ? " active" : "")}
+          onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={onDrop}
+          onClick={(e) => { if (!e.defaultPrevented) fileInput.current?.click(); }}
+        >
+          <div className="dz-icon">⬆</div>
+          <div className="dz-text">
+            <strong>Drag &amp; drop PDFs here</strong>
+            <div className="muted">or click to pick files</div>
+            <button
+              className="dz-folder-btn"
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); folderInput.current?.click(); }}
+            >
+              📁 Pick a folder
             </button>
           </div>
         </div>
 
-        {/* Queue card */}
-        <div className="card">
-          <div className="card-head">
-            <h2>2 · Queue</h2>
+        {/* hidden native pickers */}
+        <input
+          ref={fileInput}
+          type="file"
+          accept="application/pdf"
+          multiple
+          hidden
+          onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = ""; }}
+        />
+        <input
+          ref={folderInput}
+          type="file"
+          hidden
+          onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = ""; }}
+        />
+
+        {/* File grid */}
+        {queue.length > 0 && (
+          <div className="file-grid">
+            {queue.map((it) => (
+              <div key={it.id} className={`file-box status-${it.status}`}>
+                <div className="file-box-progress-track">
+                  <div
+                    className={`file-box-progress${it.status === "reading" ? " indeterminate" : ""}`}
+                    style={{ width: it.status === "done" ? "100%" : it.status === "reading" ? undefined : "0%" }}
+                  />
+                </div>
+                <button className="file-box-x" onClick={() => removeItem(it.id)} title="Remove">×</button>
+                <div className="file-box-icon">📄</div>
+                <div className="file-box-name" title={it.name}>{it.name}</div>
+                <span className={`${STATUS[it.status].cls} file-status-badge`}>
+                  {STATUS[it.status].label}
+                </span>
+                {it.error && <div className="file-box-error" title={it.error}>{it.error}</div>}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {queue.length > 0 && (
+          <div className="row gap queue-actions">
             <div className="mini-stats">
               <span className="badge pending">{counts.pending} pending</span>
               <span className="badge done">{counts.done} done</span>
-              {counts.error > 0 && (
-                <span className="badge error">{counts.error} error</span>
-              )}
+              {counts.error > 0 && <span className="badge error">{counts.error} error</span>}
+            </div>
+            <div className="row" style={{ marginLeft: "auto" }}>
+              <button className="btn primary" onClick={runAll} disabled={busy || !queue.length}>
+                {busy ? "Processing…" : "Extract all"}
+              </button>
+              <button className="btn ghost" onClick={clearAll} disabled={busy || !queue.length}>
+                Clear
+              </button>
             </div>
           </div>
-
-          {queue.length === 0 ? (
-            <div className="empty">No files yet. Add some PDFs to begin.</div>
-          ) : (
-            <ul className="queue">
-              {queue.map((it) => (
-                <li key={it.id}>
-                  <span className="fname" title={it.path || it.name}>
-                    {it.name}
-                  </span>
-                  <span className={STATUS[it.status].cls}>
-                    {STATUS[it.status].label}
-                  </span>
-                  {it.error && <span className="err-msg">{it.error}</span>}
-                  <button
-                    className="x"
-                    onClick={() => removeItem(it.id)}
-                    title="Remove"
-                  >
-                    ×
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-
-          <div className="row gap">
-            <button className="btn primary" onClick={runAll} disabled={busy || !queue.length}>
-              {busy ? "Processing…" : "Extract all"}
-            </button>
-            <button className="btn ghost" onClick={clearAll} disabled={busy || !queue.length}>
-              Clear
-            </button>
-          </div>
-        </div>
+        )}
       </section>
 
       {/* Results */}
       <section className="card results">
         <div className="card-head">
-          <h2>3 · Results {rows.length > 0 && <span className="count">({rows.length})</span>}</h2>
-          <div className="row">
-            <input
-              className="text-input"
-              placeholder="Output path e.g. /path/to/policies.xlsx (blank = download)"
-              value={outputPath}
-              onChange={(e) => setOutputPath(e.target.value)}
-              style={{ minWidth: 320 }}
-            />
-            <button className="btn" onClick={saveToDisk} disabled={busy || !rows.length}>
-              Save to disk
+          <h2>2 · Results {rows.length > 0 && <span className="count">({rows.length})</span>}</h2>
+          <div className="row output-row">
+            <button className="btn" onClick={pickOutputPath} disabled={busy}>
+              📁 Choose output
             </button>
+            <span className="output-path-display" title={outputPath}>
+              {outputPath || <span className="muted">No path chosen — will download</span>}
+            </span>
+            {outputPath && (
+              <button className="btn" onClick={saveToDisk} disabled={busy || !rows.length}>
+                Save to disk
+              </button>
+            )}
             <button className="btn primary" onClick={downloadExcel} disabled={busy || !rows.length}>
               Download .xlsx
             </button>
@@ -477,9 +492,7 @@ export default function App() {
               <thead>
                 <tr>
                   <th className="rownum">#</th>
-                  {COLUMNS.map((c) => (
-                    <th key={c}>{c}</th>
-                  ))}
+                  {COLUMNS.map((c) => <th key={c}>{c}</th>)}
                   <th></th>
                 </tr>
               </thead>
@@ -492,22 +505,14 @@ export default function App() {
                       if (AMOUNT_COLS.has(c)) {
                         return (
                           <td key={c} className="col-amount">
-                            <input
-                              className="cell cell-amount"
-                              value={formatAmount(raw)}
-                              onChange={(e) => editCell(i, c, e.target.value)}
-                            />
+                            <input className="cell cell-amount" value={formatAmount(raw)} onChange={(e) => editCell(i, c, e.target.value)} />
                           </td>
                         );
                       }
                       if (DATE_COLS.has(c)) {
                         return (
                           <td key={c} className="col-date">
-                            <input
-                              className="cell cell-date"
-                              value={formatDate(raw)}
-                              onChange={(e) => editCell(i, c, e.target.value)}
-                            />
+                            <input className="cell cell-date" value={formatDate(raw)} onChange={(e) => editCell(i, c, e.target.value)} />
                           </td>
                         );
                       }
@@ -523,14 +528,30 @@ export default function App() {
                       );
                     })}
                     <td>
-                      <button className="x" onClick={() => deleteRow(i)} title="Delete row">
-                        ×
-                      </button>
+                      <button className="x" onClick={() => deleteRow(i)} title="Delete row">×</button>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+      </section>
+
+      {/* Log panel */}
+      <section className={"card log-panel" + (logsOpen ? " open" : "")}>
+        <button className="log-panel-header" onClick={() => setLogsOpen((v) => !v)}>
+          <span>Logs</span>
+          <span className="log-count">{logs.length}</span>
+          <span className="log-chevron">{logsOpen ? "▲" : "▼"}</span>
+        </button>
+        {logsOpen && (
+          <div className="log-body">
+            {logs.length === 0
+              ? <span className="muted">No logs yet.</span>
+              : logs.map((line, i) => <div key={i} className="log-line">{line}</div>)
+            }
+            <div ref={logsEndRef} />
           </div>
         )}
       </section>
