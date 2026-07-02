@@ -102,10 +102,13 @@ endpoint automatically and shows a status indicator in the UI.
 In the extraction panel, switch the **Engine** toggle from *Regex* to *Ollama*
 and pick your model from the dropdown. Then extract as usual.
 
-**Vision fallback** — if a PDF has fewer than 200 characters of extractable
-text (scanned / image PDF), the app automatically retries using the vision API
-instead of the text API. A vision-capable model (`llava`, `minicpm-v`, etc.)
-must be installed for this to work; otherwise it falls back to the text prompt.
+**Image-based extraction** — pick a vision-capable model (`llava`,
+`minicpm-v`, `moondream`, etc.; shown as *Image Based* in the dropdown) and the
+app renders each page to an image and reads the fields straight from the
+picture. The first 2 pages are sent by default (small vision models have tight
+context windows; raise `OLLAMA_VISION_MAX_PAGES` for roomier ones). The image
+path is also used automatically when a PDF has fewer than 200 characters of
+extractable text (a scanned / image-only PDF).
 
 ### Troubleshooting
 
@@ -114,7 +117,7 @@ must be installed for this to work; otherwise it falls back to the text prompt.
 | "Ollama not running" badge | `ollama serve` is not running — start it |
 | Empty model list | Pull at least one model: `ollama pull llama3.2` |
 | Timeout on large PDFs | Only the first 8 000 chars are sent; try a faster model |
-| Vision fails | Install `pymupdf`: `pip install pymupdf` |
+| Vision returns empty / errors | Pick an *Image Based* model; lower `OLLAMA_VISION_MAX_PAGES` if the model rejects the request for exceeding its context size |
 
 ---
 

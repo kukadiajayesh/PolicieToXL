@@ -455,7 +455,11 @@ td .cell:focus { background: var(--cell-focus); }
   cursor: pointer;
 }
 .retry-btn:hover { background: rgba(255, 107, 107, 0.1); }
-.model-select {
+.model-select-wrap { position: relative; }
+.model-select-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   background: var(--panel-2);
   border: 1px solid var(--line);
   color: var(--text);
@@ -464,7 +468,35 @@ td .cell:focus { background: var(--cell-focus); }
   border-radius: 7px;
   cursor: pointer;
   max-width: 220px;
+  white-space: nowrap;
 }
+.model-select-btn:hover { background: var(--hover); }
+.model-kind { font-weight: 600; font-size: 12px; }
+.model-real-name { font-size: 9px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; max-width: 120px; }
+.model-chevron { font-size: 9px; color: var(--muted); margin-left: 2px; }
+.model-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 200;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px 0;
+  min-width: 180px;
+  box-shadow: 0 6px 16px rgba(0,0,0,0.18);
+  list-style: none;
+  margin: 0;
+}
+.model-opt {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 12px;
+  cursor: pointer;
+  gap: 1px;
+}
+.model-opt:hover, .model-opt.selected { background: var(--hover); }
+.model-opt.selected .model-kind { color: var(--brand); }
 
 /* Date columns */
 .col-date { text-align: center; }

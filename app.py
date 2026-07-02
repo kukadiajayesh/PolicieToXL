@@ -23,6 +23,7 @@ import tempfile
 import threading
 import subprocess
 import collections
+import concurrent.futures
 from functools import lru_cache
 
 logging.basicConfig(
@@ -53,21 +54,25 @@ _ui_handler.setFormatter(
     logging.Formatter("%(name)s: %(message)s")
 )
 logging.getLogger().addHandler(_ui_handler)
+logger = logging.getLogger(__name__)
 # ────────────────────────────────────────────────────────────────────────────
 
 from flask import Flask, request, jsonify, send_from_directory, send_file, Response, stream_with_context
+from werkzeug.utils import safe_join
 import pandas as pd
 
 import pypdfium2 as pdfium
 from PIL import Image, ImageDraw
 
 from extract_policies import (
-    read_text,
+    read_document,
     extract_fields,
+    process_pdf,
     extract_fields_ollama,
     extract_fields_ollama_vision,
     locate_fields,
     _is_text_poor,
+    _is_vision_model,
     ollama_status,
 )
 
@@ -98,6 +103,9 @@ COLUMNS = [
 _DOC_DIR = tempfile.mkdtemp(prefix="pdfxl_docs_")
 _DOC_REGISTRY: dict[str, str] = {}
 _DOC_LOCK = threading.Lock()
+# Cap the registry so a long-running session can't accumulate unbounded
+# uploaded-PDF copies; evicting the oldest just disables its hover preview.
+_MAX_DOCS = 500
 # Don't leave copies of uploaded PDFs behind when the app closes.
 atexit.register(lambda: shutil.rmtree(_DOC_DIR, ignore_errors=True))
 
@@ -118,20 +126,63 @@ def _register_doc(src_path: str, copy: bool) -> str:
         path = os.path.abspath(src_path)
     with _DOC_LOCK:
         _DOC_REGISTRY[doc_id] = path
+        while len(_DOC_REGISTRY) > _MAX_DOCS:
+            old_id = next(iter(_DOC_REGISTRY))
+            old_path = _DOC_REGISTRY.pop(old_id)
+            if old_path.startswith(_DOC_DIR):
+                try:
+                    os.unlink(old_path)
+                except OSError:
+                    pass
     return doc_id
 
 
-def _augment_row(row: dict, pdf_path: str, copy: bool) -> dict:
+def _augment_row(row: dict, pdf_path: str, copy: bool, pages_words=None, locations=None) -> dict:
     """Attach a doc_id and per-field source locations for the hover preview."""
     doc_id = _register_doc(pdf_path, copy=copy)
-    try:
-        locations = locate_fields(pdf_path, row)
-    except Exception as exc:  # noqa: BLE001 — preview is best-effort
-        logger.warning("Field location failed for %s: %s", row.get("Source File"), exc)
-        locations = {}
+    if locations is None:
+        try:
+            locations = locate_fields(pdf_path, row, pages_words=pages_words)
+        except Exception as exc:  # noqa: BLE001 — preview is best-effort
+            logger.warning("Field location failed for %s: %s", row.get("Source File"), exc)
+            locations = {}
     row["_doc_id"] = doc_id
     row["_locations"] = locations
     return row
+
+
+# ── Extraction process pool ─────────────────────────────────────────────────
+# pdfminer parsing is pure Python, so concurrent requests only truly overlap
+# in worker processes (threads just contend on the GIL). Created lazily on the
+# first regex extraction; skipped in frozen builds where multiprocessing under
+# PyInstaller is fragile.
+_POOL: concurrent.futures.ProcessPoolExecutor | None = None
+_POOL_LOCK = threading.Lock()
+
+
+def _pool() -> concurrent.futures.ProcessPoolExecutor:
+    global _POOL
+    with _POOL_LOCK:
+        if _POOL is None:
+            _POOL = concurrent.futures.ProcessPoolExecutor(
+                max_workers=min(4, os.cpu_count() or 1)
+            )
+            atexit.register(_POOL.shutdown, wait=False, cancel_futures=True)
+        return _POOL
+
+
+def _process_pdf(path: str) -> tuple[dict, dict]:
+    """Run the regex pipeline for one PDF, in a worker process when possible."""
+    global _POOL
+    if getattr(sys, "frozen", False):
+        return process_pdf(path)
+    try:
+        return _pool().submit(process_pdf, path).result()
+    except concurrent.futures.process.BrokenProcessPool:
+        logger.warning("Extraction process pool broke; retrying in-process")
+        with _POOL_LOCK:
+            _POOL = None
+        return process_pdf(path)
 
 
 @lru_cache(maxsize=8)
@@ -175,6 +226,13 @@ def _render_crop(doc_id: str, page_no: int, bbox) -> bytes:
 # ────────────────────────────────────────────────────────────────────────────
 
 app = Flask(__name__, static_folder=None)
+# Reject pathological uploads before they hit the disk; policy PDFs are small.
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB
+
+
+@app.errorhandler(413)
+def _too_large(e):
+    return jsonify({"error": "File too large (limit is 100 MB)."}), 413
 
 
 # ----------------------------------------------------------------------------
@@ -199,8 +257,9 @@ def index():
 
 @app.route("/<path:path>")
 def static_proxy(path):
-    full = os.path.join(DIST_DIR, path)
-    if os.path.exists(full):
+    # safe_join refuses traversal outside DIST_DIR (returns None).
+    full = safe_join(DIST_DIR, path)
+    if full and os.path.isfile(full):
         return send_from_directory(DIST_DIR, path)
     # SPA fallback
     return send_from_directory(DIST_DIR, "index.html")
@@ -212,7 +271,7 @@ def static_proxy(path):
 @app.route("/api/scan", methods=["POST"])
 def scan():
     """List the PDFs found in a local folder path."""
-    data = request.get_json(force=True) or {}
+    data = request.get_json(silent=True) or {}
     folder = (data.get("folder") or "").strip()
     folder = os.path.expanduser(folder)
     if not folder or not os.path.isdir(folder):
@@ -226,20 +285,32 @@ def _do_extract(path: str, text: str, engine: str, model: str) -> dict:
     if engine == "ollama":
         if not model:
             raise ValueError("No Ollama model specified")
-        if _is_text_poor(text):
-            logger.info("Poor text layer in %s — trying vision fallback", os.path.basename(path))
+        # Use the image path when the user picked a vision model, or when the
+        # text layer is too poor for text extraction to work on its own.
+        if _is_vision_model(model) or _is_text_poor(text):
+            why = "vision model" if _is_vision_model(model) else "poor text layer"
+            logger.info("Using vision extraction for %s (%s)", os.path.basename(path), why)
             try:
                 return extract_fields_ollama_vision(path, model)
             except Exception as exc:
-                logger.warning("Vision fallback failed (%s), falling back to text", exc)
+                logger.warning("Vision extraction failed (%s), falling back to text", exc)
         return extract_fields_ollama(text, model)
     return extract_fields(text)
 
 
+_ENGINES = ("regex", "ollama")
+
+
 def _extract_one(path, engine="regex", model=""):
-    row = _do_extract(path, read_text(path), engine, model)
+    if engine == "regex":
+        # Whole pipeline (one parse for fields + preview locations) in a worker.
+        row, locations = _process_pdf(path)
+        row["Source File"] = os.path.basename(path)
+        return _augment_row(row, path, copy=False, locations=locations)
+    text, pages_words = read_document(path)
+    row = _do_extract(path, text, engine, model)
     row["Source File"] = os.path.basename(path)
-    return _augment_row(row, path, copy=False)
+    return _augment_row(row, path, copy=False, pages_words=pages_words)
 
 
 @app.route("/api/ollama/status", methods=["GET"])
@@ -263,25 +334,37 @@ def extract():
         name = f.filename or "uploaded.pdf"
         engine = request.form.get("engine", "regex")
         model = request.form.get("model", "")
+        if engine not in _ENGINES:
+            return jsonify({"error": f"Unknown engine: {engine}", "source": name}), 400
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-            f.save(tmp.name)
+            # Save through the open handle (re-opening by name breaks on Windows).
+            f.save(tmp)
             tmp_path = tmp.name
         try:
-            text = read_text(tmp_path)
+            if engine == "regex":
+                row, locations = _process_pdf(tmp_path)
+                row["Source File"] = name
+                # copy=True keeps a copy alive for previews after the temp is removed
+                return jsonify({"row": _augment_row(row, tmp_path, copy=True, locations=locations)})
+            text, pages_words = read_document(tmp_path)
             row = _do_extract(tmp_path, text, engine, model)
             row["Source File"] = name
-            # copy=True keeps a copy alive for previews after the temp is removed
-            return jsonify({"row": _augment_row(row, tmp_path, copy=True)})
+            return jsonify({"row": _augment_row(row, tmp_path, copy=True, pages_words=pages_words)})
         except Exception as e:  # noqa: BLE001
             return jsonify({"error": str(e), "source": name}), 500
         finally:
-            os.unlink(tmp_path)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
     # path on disk (folder scan)
     data = request.get_json(silent=True) or {}
     path = (data.get("path") or "").strip()
     engine = data.get("engine", "regex")
     model = data.get("model", "")
+    if engine not in _ENGINES:
+        return jsonify({"error": f"Unknown engine: {engine}"}), 400
     if not path or not os.path.isfile(path):
         return jsonify({"error": f"Not a file: {path}"}), 400
     try:
@@ -312,6 +395,8 @@ def preview():
         )
     except (KeyError, ValueError):
         return jsonify({"error": "Bad preview parameters."}), 400
+    if page_no < 0 or bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        return jsonify({"error": "Bad preview parameters."}), 400
     try:
         png = _render_crop(doc_id, page_no, bbox)
     except Exception as e:  # noqa: BLE001
@@ -327,10 +412,10 @@ def export():
     If `output_path` is given, save there and return the path. Otherwise stream
     the .xlsx back to the browser as a download.
     """
-    data = request.get_json(force=True) or {}
+    data = request.get_json(silent=True) or {}
     rows = data.get("rows") or []
     output_path = (data.get("output_path") or "").strip()
-    if not rows:
+    if not rows or not all(isinstance(r, dict) for r in rows):
         return jsonify({"error": "No rows to export."}), 400
 
     cols = [c for c in COLUMNS if any(c in r for r in rows)] or COLUMNS
@@ -341,12 +426,18 @@ def export():
         output_path = os.path.expanduser(output_path)
         if not output_path.lower().endswith(".xlsx"):
             output_path += ".xlsx"
-        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-        df.to_excel(output_path, index=False)
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+            df.to_excel(output_path, index=False)
+        except Exception as e:  # noqa: BLE001 — surface disk/permission errors as JSON
+            return jsonify({"error": f"Could not save {output_path}: {e}"}), 500
         return jsonify({"saved": output_path, "rows": len(df)})
 
     buf = io.BytesIO()
-    df.to_excel(buf, index=False)
+    try:
+        df.to_excel(buf, index=False)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"Could not build Excel file: {e}"}), 500
     buf.seek(0)
     return send_file(
         buf,
@@ -415,4 +506,8 @@ def pick_output():
 
 if __name__ == "__main__":
     print("Insurance PDF extractor running at http://127.0.0.1:5001")
-    app.run(host="127.0.0.1", port=5001, debug=False)
+    try:
+        app.run(host="127.0.0.1", port=5001, debug=False)
+    except OSError as e:
+        print(f"Could not start on 127.0.0.1:5001 ({e}). Is the app already running?")
+        sys.exit(1)

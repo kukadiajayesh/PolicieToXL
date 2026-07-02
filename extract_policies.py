@@ -59,7 +59,11 @@ _MIN_TEXT_CHARS = 200
 _OLLAMA_TIMEOUT = _env_int("OLLAMA_TIMEOUT", 180)
 _OLLAMA_VISION_TIMEOUT = _env_int("OLLAMA_VISION_TIMEOUT", 300)
 _OLLAMA_STATUS_TIMEOUT = _env_int("OLLAMA_STATUS_TIMEOUT", 5)
-_OLLAMA_VISION_MAX_PAGES = _env_int("OLLAMA_VISION_MAX_PAGES", 5)
+# Each rendered page image costs ~700-800 tokens. Small vision models (moondream
+# is 2048) reject requests that overflow their context, so cap pages low — the
+# key policy fields sit on the first page(s) anyway. Bump via env for roomier
+# models (llava, minicpm-v).
+_OLLAMA_VISION_MAX_PAGES = _env_int("OLLAMA_VISION_MAX_PAGES", 2)
 
 _EXTRACT_PROMPT = """\
 You are an insurance document parser. Extract the following fields from the \
@@ -159,25 +163,44 @@ def _normalize_llm_fields(fields: dict) -> dict:
 
 
 def pdf_pages_to_b64(pdf_path: str, max_pages: int | None = None) -> list[str]:
-    """Render PDF pages to base64-encoded PNGs (requires pymupdf).
+    """Render PDF pages to base64-encoded PNGs (requires pypdfium2).
 
     ``max_pages`` caps how many leading pages are rendered so a long document
     can't balloon the vision request payload or blow the timeout.
     """
     try:
-        import fitz  # PyMuPDF
+        import pypdfium2 as pdfium
     except ImportError:
         raise RuntimeError(
-            "pymupdf is required for vision extraction. Install it with: pip install pymupdf"
+            "pypdfium2 is required for vision extraction. Install it with: pip install pypdfium2"
         )
-    doc = fitz.open(pdf_path)
+    import io
+
     try:
+        doc = pdfium.PdfDocument(pdf_path)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not open {os.path.basename(pdf_path)} for rendering: {exc}"
+        ) from exc
+    try:
+        n_pages = len(doc) if max_pages is None else min(len(doc), max_pages)
         images = []
-        for i, page in enumerate(doc):
-            if max_pages is not None and i >= max_pages:
-                break
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2× zoom ≈ 144 dpi
-            images.append(base64.b64encode(pix.tobytes("png")).decode())
+        for i in range(n_pages):
+            try:
+                pil = doc[i].render(scale=2.0).to_pil()  # 2× zoom ≈ 144 dpi
+            except Exception as exc:
+                # One corrupt page shouldn't sink the whole vision request.
+                logger.warning(
+                    "Skipping unrenderable page %d of %s: %s",
+                    i + 1, os.path.basename(pdf_path), exc,
+                )
+                continue
+            buf = io.BytesIO()
+            # JPEG encodes several times faster than PNG and keeps the base64
+            # payload (and the model's image-ingest time) much smaller; quality
+            # 90 keeps document text crisp.
+            pil.convert("RGB").save(buf, format="JPEG", quality=90)
+            images.append(base64.b64encode(buf.getvalue()).decode())
     finally:
         doc.close()
     return images
@@ -245,14 +268,39 @@ def extract_fields_ollama_vision(pdf_path: str, model: str, url: str = OLLAMA_UR
     return _ollama_generate(payload, url, _OLLAMA_VISION_TIMEOUT)
 
 
+def read_document(pdf_path: str, want_words: bool = True) -> tuple[str, list[list[dict]]]:
+    """Parse a PDF once, returning (full_text, per-page word lists).
+
+    The expensive step in pdfplumber is the per-page pdfminer layout parse.
+    Extracting the text and the word boxes from the same open document does
+    that parse once, where separate read_text() + locate_fields() calls used
+    to do it twice — roughly halving the time to process each PDF.
+    """
+    chunks: list[str] = []
+    pages_words: list[list[dict]] = []
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                chunks.append(page.extract_text() or "")
+                if want_words:
+                    pages_words.append(page.extract_words())
+                # Parsed page objects are large; drop each page's cache as we
+                # go so a long PDF doesn't hold every page in memory at once.
+                page.flush_cache()
+    except Exception as exc:
+        hint = ""
+        if "password" in str(exc).lower() or "decrypt" in str(exc).lower():
+            hint = " — the PDF appears to be password-protected"
+        raise RuntimeError(
+            f"Could not read {os.path.basename(pdf_path)}: {exc}{hint}"
+        ) from exc
+    # collapse whitespace so regexes are easier to write
+    return re.sub(r"[ \t]+", " ", "\n".join(chunks)), pages_words
+
+
 def read_text(pdf_path: str) -> str:
     """Extract the full text layer from a PDF."""
-    chunks = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            chunks.append(page.extract_text() or "")
-    # collapse whitespace so regexes are easier to write
-    return re.sub(r"[ \t]+", " ", "\n".join(chunks))
+    return read_document(pdf_path, want_words=False)[0]
 
 
 def first(pattern, text, group=1, flags=re.IGNORECASE):
@@ -275,6 +323,14 @@ def first(pattern, text, group=1, flags=re.IGNORECASE):
     return val.strip() if val else ""
 
 
+_VISION_KEYWORDS = ("llava", "bakllava", "moondream", "minicpm-v", "vision", "-vl")
+
+
+def _is_vision_model(name: str) -> bool:
+    lower = name.lower()
+    return any(k in lower for k in _VISION_KEYWORDS)
+
+
 def ollama_status(url: str = OLLAMA_URL) -> dict:
     """Return {"ok": True, "models": [...]} or {"ok": False, "error": "..."}."""
     if not _REQUESTS_OK:
@@ -282,7 +338,12 @@ def ollama_status(url: str = OLLAMA_URL) -> dict:
     try:
         r = _requests.get(f"{url}/api/tags", timeout=_OLLAMA_STATUS_TIMEOUT)
         r.raise_for_status()
-        models = [m.get("name") for m in r.json().get("models", []) if m.get("name")]
+        all_models = [m.get("name") for m in r.json().get("models", []) if m.get("name")]
+        # Text models first so the UI default lands on a text model.
+        models = sorted(
+            [{"name": n, "vision": _is_vision_model(n)} for n in all_models],
+            key=lambda m: m["vision"],
+        )
         return {"ok": True, "models": models}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
@@ -456,13 +517,18 @@ def _norm_token(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(s).lower())
 
 
-def locate_fields(pdf_path: str, fields: dict, min_len: int = 3) -> dict:
+def locate_fields(
+    pdf_path: str, fields: dict, min_len: int = 3, pages_words: list[list[dict]] | None = None
+) -> dict:
     """Find where each extracted field value sits on the page.
 
     For every non-empty value we normalise it (drop spaces/punctuation/case) and
     search the normalised stream of words on each page. The bounding box of the
     matching words is returned so the UI can render a zoomed, highlighted crop of
     the source PDF for verification.
+
+    ``pages_words`` lets a caller that already parsed the document (see
+    read_document) skip a second full parse of the PDF.
 
     Returns {field_name: {"page": int, "bbox": [x0, top, x1, bottom]}}; fields
     that can't be located (or are too short to match unambiguously) are omitted.
@@ -478,47 +544,66 @@ def locate_fields(pdf_path: str, fields: dict, min_len: int = 3) -> dict:
     if not targets:
         return {}
 
-    found: dict = {}
+    if pages_words is not None:
+        return _locate_in_pages(pages_words, targets)
     with pdfplumber.open(pdf_path) as pdf:
-        for page_no, page in enumerate(pdf.pages):
-            words = page.extract_words()
-            if not words:
-                continue
-            # Concatenate all normalised words on the page, remembering which
-            # character range each word occupies so we can map a match back to
-            # the words (and therefore the bounding boxes) that produced it.
-            concat = ""
-            spans = []  # (start, end, word_index)
-            for wi, w in enumerate(words):
-                nw = _norm_token(w["text"])
-                if not nw:
-                    continue
-                start = len(concat)
-                concat += nw
-                spans.append((start, len(concat), wi))
+        return _locate_in_pages((page.extract_words() for page in pdf.pages), targets)
 
-            for key, norm in targets.items():
-                if key in found:
-                    continue
-                pos = concat.find(norm)
-                if pos < 0:
-                    continue
-                end = pos + len(norm)
-                hits = [wi for (s, e, wi) in spans if s < end and e > pos]
-                if not hits:
-                    continue
-                found[key] = {
-                    "page": page_no,
-                    "bbox": [
-                        min(words[i]["x0"] for i in hits),
-                        min(words[i]["top"] for i in hits),
-                        max(words[i]["x1"] for i in hits),
-                        max(words[i]["bottom"] for i in hits),
-                    ],
-                }
-            if len(found) == len(targets):
-                break
+
+def _locate_in_pages(pages_words, targets: dict) -> dict:
+    """Match normalised target strings against per-page word lists."""
+    found: dict = {}
+    for page_no, words in enumerate(pages_words):
+        if not words:
+            continue
+        # Concatenate all normalised words on the page, remembering which
+        # character range each word occupies so we can map a match back to
+        # the words (and therefore the bounding boxes) that produced it.
+        concat = ""
+        spans = []  # (start, end, word_index)
+        for wi, w in enumerate(words):
+            nw = _norm_token(w["text"])
+            if not nw:
+                continue
+            start = len(concat)
+            concat += nw
+            spans.append((start, len(concat), wi))
+
+        for key, norm in targets.items():
+            if key in found:
+                continue
+            pos = concat.find(norm)
+            if pos < 0:
+                continue
+            end = pos + len(norm)
+            hits = [wi for (s, e, wi) in spans if s < end and e > pos]
+            if not hits:
+                continue
+            found[key] = {
+                "page": page_no,
+                "bbox": [
+                    min(words[i]["x0"] for i in hits),
+                    min(words[i]["top"] for i in hits),
+                    max(words[i]["x1"] for i in hits),
+                    max(words[i]["bottom"] for i in hits),
+                ],
+            }
+        if len(found) == len(targets):
+            break
     return found
+
+
+def process_pdf(pdf_path: str) -> tuple[dict, dict]:
+    """Full regex pipeline for one PDF: returns (fields row, preview locations).
+
+    Top-level and returning only plain picklable data so app.py can run it in a
+    worker process — pdfminer parsing is pure Python, so real parallelism for
+    batch extraction needs processes, not threads.
+    """
+    text, pages_words = read_document(pdf_path)
+    row = extract_fields(text)
+    locations = locate_fields(pdf_path, row, pages_words=pages_words)
+    return row, locations
 
 
 def main():
@@ -540,8 +625,16 @@ def main():
         except Exception as e:
             print(f"ERR {os.path.basename(path)}: {e}")
 
+    if not rows:
+        print("No rows extracted; nothing to write.")
+        sys.exit(1)
+
     df = pd.DataFrame(rows)
-    df.to_excel(out, index=False)
+    try:
+        df.to_excel(out, index=False)
+    except Exception as e:
+        print(f"ERR could not write {out}: {e}")
+        sys.exit(1)
     print(f"\nWrote {len(rows)} rows -> {out}")
     # also print to screen so you can eyeball it
     print(df.to_string(index=False))

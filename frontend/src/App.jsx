@@ -1,5 +1,41 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+function ModelDropdown({ models, value, onChange }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  const selected = models.find((m) => m.name === value) || null;
+
+  useEffect(() => {
+    const handler = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  return (
+    <div className="model-select-wrap" ref={ref}>
+      <button className="model-select-btn" onClick={() => setOpen((v) => !v)} type="button">
+        <span className="model-kind">{selected ? (selected.vision ? "Image Based" : "Text Based") : "Select model"}</span>
+        {selected && <span className="model-real-name">{selected.name}</span>}
+        <span className="model-chevron">{open ? "▴" : "▾"}</span>
+      </button>
+      {open && (
+        <ul className="model-dropdown">
+          {models.map((m) => (
+            <li
+              key={m.name}
+              className={"model-opt" + (m.name === value ? " selected" : "")}
+              onClick={() => { onChange(m.name); setOpen(false); }}
+            >
+              <span className="model-kind">{m.vision ? "Image Based" : "Text Based"}</span>
+              <span className="model-real-name">{m.name}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 const AMOUNT_COLS = new Set(["Premium"]);
 const DATE_COLS = new Set(["Date Start", "End Date"]);
 const CAMEL_COLS = new Set(["Party Name", "Type of Insurance"]);
@@ -116,29 +152,34 @@ export default function App() {
   const cycleTheme = () =>
     setTheme((t) => THEME_ORDER[(THEME_ORDER.indexOf(t) + 1) % THEME_ORDER.length]);
 
-  const checkOllama = async ({ setDefault = false } = {}) => {
+  const checkOllama = async ({ setDefault = false, attempts = 1 } = {}) => {
     setOllamaStatus("checking");
     setOllamaError("");
-    try {
-      const res = await fetch("/api/ollama/status");
-      const data = await res.json();
-      if (data.ok) {
-        setOllamaModels(data.models || []);
-        setOllamaModel((m) => m || data.models?.[0] || "");
-        setOllamaStatus("ok");
-        if (setDefault) setEngine("ollama");
-      } else {
-        setOllamaStatus("error");
+    // Ollama may still be starting up when the page loads, so a single failed
+    // probe shouldn't condemn it — retry a few times before showing the error.
+    for (let i = 0; i < attempts; i++) {
+      try {
+        const res = await fetch("/api/ollama/status");
+        const data = await res.json();
+        if (data.ok) {
+          setOllamaModels(data.models || []);
+          setOllamaModel((m) => m || data.models?.[0]?.name || "");
+          setOllamaStatus("ok");
+          if (setDefault) setEngine("ollama");
+          return;
+        }
         setOllamaError(data.error || "Ollama not reachable");
+      } catch {
+        setOllamaError("Could not reach Ollama");
       }
-    } catch {
-      setOllamaStatus("error");
-      setOllamaError("Could not reach Ollama");
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, 2000));
     }
+    setOllamaStatus("error");
   };
 
-  // On mount: probe Ollama and default to it if available.
-  useEffect(() => { checkOllama({ setDefault: true }); }, []);
+  // On mount: probe Ollama (patiently — it may still be booting) and default
+  // to it if available.
+  useEffect(() => { checkOllama({ setDefault: true, attempts: 5 }); }, []);
 
   // SSE log stream
   useEffect(() => {
@@ -154,8 +195,12 @@ export default function App() {
     if (logsOpen) logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs, logsOpen]);
 
+  // Re-probe whenever the user switches to Ollama and it isn't confirmed up —
+  // including after an earlier failed check (they may have started it since).
   useEffect(() => {
-    if (engine === "ollama" && ollamaStatus === null) checkOllama();
+    if (engine === "ollama" && ollamaStatus !== "ok" && ollamaStatus !== "checking") {
+      checkOllama({ attempts: 2 });
+    }
   }, [engine]);
 
   useEffect(() => {
@@ -201,7 +246,7 @@ export default function App() {
       q.map((it) => (it.id === id ? { ...it, status, error } : it))
     );
 
-  const extractOne = async (item) => {
+  const extractOne = async (item, orderIdx) => {
     setItemStatus(item.id, "reading");
     try {
       let res;
@@ -218,9 +263,17 @@ export default function App() {
           body: JSON.stringify({ path: item.path, engine, model: engine === "ollama" ? ollamaModel : "" }),
         });
       }
-      const data = await res.json();
+      let data;
+      try {
+        data = await res.json();
+      } catch {
+        throw new Error(`Server error (HTTP ${res.status})`);
+      }
       if (!res.ok) throw new Error(data.error || "Extraction failed");
-      setRows((r) => [...r, data.row]);
+      // Results can arrive out of order when extracting concurrently; keep the
+      // table sorted by queue position.
+      const row = { ...data.row, _qidx: orderIdx };
+      setRows((r) => [...r, row].sort((a, b) => (a._qidx ?? 0) - (b._qidx ?? 0)));
       setItemStatus(item.id, "done");
     } catch (err) {
       setItemStatus(item.id, "error", err.message);
@@ -235,9 +288,20 @@ export default function App() {
     setQueue((q) =>
       q.map((it) => (it.status === "done" || it.status === "error" ? { ...it, status: "pending", error: undefined } : it))
     );
-    for (const item of queue) {
-      await extractOne(item);
-    }
+    // Regex extraction is CPU-bound in the backend, so a few PDFs in flight at
+    // once overlap nicely; Ollama runs one generation at a time, keep it serial.
+    const limit = engine === "ollama" ? 1 : 3;
+    const items = queue;
+    let next = 0;
+    const worker = async () => {
+      while (next < items.length) {
+        const idx = next++;
+        await extractOne(items[idx], idx);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(limit, items.length) }, worker)
+    );
     setBusy(false);
     flash("Done processing.", "info");
   };
@@ -266,6 +330,26 @@ export default function App() {
       if (data.path) setOutputPath(data.path);
     } catch {
       flash("Could not open file picker.", "error");
+    }
+  };
+
+  const copyToClipboard = async () => {
+    if (!rows.length) return flash("No results to copy.", "error");
+    const fmt = (col, val) => {
+      if (AMOUNT_COLS.has(col)) return formatAmount(val);
+      if (DATE_COLS.has(col)) return formatDate(val);
+      if (CAMEL_COLS.has(col)) return toTitleCase(val);
+      return val ?? "";
+    };
+    const tsv = [
+      COLUMNS.join("\t"),
+      ...rows.map((row) => COLUMNS.map((c) => fmt(c, row[c] ?? "")).join("\t")),
+    ].join("\n");
+    try {
+      await navigator.clipboard.writeText(tsv);
+      flash(`Copied ${rows.length} row${rows.length > 1 ? "s" : ""} to clipboard.`, "info");
+    } catch {
+      flash("Clipboard access denied.", "error");
     }
   };
 
@@ -411,20 +495,18 @@ export default function App() {
                 {ollamaStatus === "error" && (
                   <span className="ollama-err" title={ollamaError}>
                     ✕ Not reachable
-                    <button className="retry-btn" onClick={checkOllama}>Retry</button>
+                    <button className="retry-btn" onClick={() => checkOllama({ attempts: 3 })}>Retry</button>
                   </span>
                 )}
                 {ollamaStatus === "ok" && ollamaModels.length === 0 && (
                   <span className="muted">No models installed</span>
                 )}
                 {ollamaStatus === "ok" && ollamaModels.length > 0 && (
-                  <select
-                    className="model-select"
+                  <ModelDropdown
+                    models={ollamaModels}
                     value={ollamaModel}
-                    onChange={(e) => setOllamaModel(e.target.value)}
-                  >
-                    {ollamaModels.map((m) => <option key={m} value={m}>{m}</option>)}
-                  </select>
+                    onChange={setOllamaModel}
+                  />
                 )}
               </div>
             )}
@@ -525,6 +607,9 @@ export default function App() {
                 Save to disk
               </button>
             )}
+            <button className="btn" onClick={copyToClipboard} disabled={busy || !rows.length}>
+              Copy
+            </button>
             <button className="btn primary" onClick={downloadExcel} disabled={busy || !rows.length}>
               Download .xlsx
             </button>
