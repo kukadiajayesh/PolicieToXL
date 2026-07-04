@@ -114,7 +114,6 @@ const THEME_META = {
 export default function App() {
   const [queue, setQueue] = useState([]);
   const [rows, setRows] = useState([]);
-  const [outputPath, setOutputPath] = useState("");
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState(null);
   const [dragging, setDragging] = useState(false);
@@ -271,9 +270,14 @@ export default function App() {
       }
       if (!res.ok) throw new Error(data.error || "Extraction failed");
       // Results can arrive out of order when extracting concurrently; keep the
-      // table sorted by queue position.
-      const row = { ...data.row, _qidx: orderIdx };
-      setRows((r) => [...r, row].sort((a, b) => (a._qidx ?? 0) - (b._qidx ?? 0)));
+      // table sorted by queue position. _qid ties the row to its queue item so
+      // a retried file replaces its old row instead of duplicating it.
+      const row = { ...data.row, _qidx: orderIdx, _qid: item.id };
+      setRows((r) =>
+        [...r.filter((x) => x._qid !== item.id), row].sort(
+          (a, b) => (a._qidx ?? 0) - (b._qidx ?? 0)
+        )
+      );
       setItemStatus(item.id, "done");
     } catch (err) {
       setItemStatus(item.id, "error", err.message);
@@ -281,30 +285,37 @@ export default function App() {
   };
 
   const runAll = async () => {
-    const pending = queue.filter((it) => it.status === "pending");
-    if (!pending.length) return flash("Nothing pending to process.", "error");
+    // Only process files still pending. Failed files stay in "error" until the
+    // user hits Retry on their card, which flips them back to pending.
+    const targets = queue.filter((it) => it.status === "pending");
+    if (!targets.length) return;
     setBusy(true);
-    setRows([]);
-    setQueue((q) =>
-      q.map((it) => (it.status === "done" || it.status === "error" ? { ...it, status: "pending", error: undefined } : it))
-    );
+    // Row order follows each file's position in the queue.
+    const order = new Map(queue.map((it, i) => [it.id, i]));
     // Regex extraction is CPU-bound in the backend, so a few PDFs in flight at
     // once overlap nicely; Ollama runs one generation at a time, keep it serial.
     const limit = engine === "ollama" ? 1 : 3;
-    const items = queue;
     let next = 0;
     const worker = async () => {
-      while (next < items.length) {
-        const idx = next++;
-        await extractOne(items[idx], idx);
+      while (next < targets.length) {
+        const item = targets[next++];
+        await extractOne(item, order.get(item.id) ?? 0);
       }
     };
     await Promise.all(
-      Array.from({ length: Math.min(limit, items.length) }, worker)
+      Array.from({ length: Math.min(limit, targets.length) }, worker)
     );
     setBusy(false);
     flash("Done processing.", "info");
   };
+
+  // Extraction starts automatically as soon as files land in the queue —
+  // no Extract button. The busy guard keeps a second run from starting while
+  // one is in flight; when it finishes, this re-fires and drains any files
+  // added in the meantime.
+  useEffect(() => {
+    if (!busy && queue.some((it) => it.status === "pending")) runAll();
+  }, [queue, busy]);
 
   const removeItem = (id) => {
     setQueue((q) => q.filter((it) => it.id !== id));
@@ -320,82 +331,25 @@ export default function App() {
       r.map((row, i) => (i === rowIdx ? { ...row, [col]: value } : row))
     );
 
-  const deleteRow = (rowIdx) =>
+  const deleteRow = (rowIdx) => {
+    // Drop the file's card too — leaving it "pending" would make the
+    // auto-extract effect immediately redo it and resurrect the row.
+    const qid = rows[rowIdx]?._qid;
+    if (qid) setQueue((q) => q.filter((it) => it.id !== qid));
     setRows((r) => r.filter((_, i) => i !== rowIdx));
-
-  const pickOutputPath = async () => {
-    try {
-      const res = await fetch("/api/pick_output", { method: "POST" });
-      const data = await res.json();
-      if (data.path) setOutputPath(data.path);
-    } catch {
-      flash("Could not open file picker.", "error");
-    }
   };
 
-  const copyToClipboard = async () => {
+  const copyAllData = async () => {
     if (!rows.length) return flash("No results to copy.", "error");
-    const fmt = (col, val) => {
-      if (AMOUNT_COLS.has(col)) return formatAmount(val);
-      if (DATE_COLS.has(col)) return formatDate(val);
-      if (CAMEL_COLS.has(col)) return toTitleCase(val);
-      return val ?? "";
-    };
     const tsv = [
       COLUMNS.join("\t"),
-      ...rows.map((row) => COLUMNS.map((c) => fmt(c, row[c] ?? "")).join("\t")),
+      ...rows.map((row) => COLUMNS.map((c) => String(row[c] ?? "")).join("\t")),
     ].join("\n");
     try {
       await navigator.clipboard.writeText(tsv);
-      flash(`Copied ${rows.length} row${rows.length > 1 ? "s" : ""} to clipboard.`, "info");
+      flash(`Copied ${rows.length} rows to clipboard.`, "info");
     } catch {
-      flash("Clipboard access denied.", "error");
-    }
-  };
-
-  const saveToDisk = async () => {
-    if (!rows.length) return flash("No results to export.", "error");
-    setBusy(true);
-    try {
-      const res = await fetch("/api/export", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows, output_path: outputPath }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Export failed");
-      flash(`Saved ${data.rows} rows → ${data.saved}`, "info");
-    } catch (err) {
-      flash(err.message, "error");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const downloadExcel = async () => {
-    if (!rows.length) return flash("No results to export.", "error");
-    setBusy(true);
-    try {
-      const res = await fetch("/api/export", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows }),
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || "Export failed");
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "policies.xlsx";
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      flash(err.message, "error");
-    } finally {
-      setBusy(false);
+      flash("Could not copy to clipboard.", "error");
     }
   };
 
@@ -441,8 +395,25 @@ export default function App() {
           onMouseEnter: (e) => showPreview(e, row, col),
           onMouseMove: movePreview,
           onMouseLeave: hidePreview,
+          onClick: (e) => {
+            e.stopPropagation();
+            openPdf(row._doc_id);
+          },
         }
       : {};
+
+  const openPdf = (docId) => {
+    if (!docId) return;
+    // Create a temporary link to trigger the PDF download/view
+    // This approach is less likely to be blocked by popup blockers than window.open
+    const link = document.createElement('a');
+    link.href = `/api/open-pdf?doc_id=${docId}`;
+    // We don't set download attribute because we want to potentially display inline
+    // depending on browser capabilities and plugin/settings
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
 
   const counts = useMemo(() => {
     const c = { pending: 0, reading: 0, done: 0, error: 0 };
@@ -551,42 +522,33 @@ export default function App() {
 
         {/* File grid */}
         {queue.length > 0 && (
-          <div className="file-grid">
-            {queue.map((it) => (
-              <div key={it.id} className={`file-box status-${it.status}`}>
-                <div className="file-box-progress-track">
-                  <div
-                    className={`file-box-progress${it.status === "reading" ? " indeterminate" : ""}`}
-                    style={{ width: it.status === "done" ? "100%" : it.status === "reading" ? undefined : "0%" }}
-                  />
+          <div className="queue-row">
+            <div className="file-grid">
+              {queue.map((it) => (
+                <div key={it.id} className={`file-box status-${it.status}`}>
+                  <div className="file-box-progress-track">
+                    <div
+                      className={`file-box-progress${it.status === "reading" ? " indeterminate" : ""}`}
+                      style={{ width: it.status === "done" ? "100%" : it.status === "reading" ? undefined : "0%" }}
+                    />
+                  </div>
+                  <button className="file-box-x" onClick={() => removeItem(it.id)} title="Remove">×</button>
+                  <div className="file-box-icon">📄</div>
+                  <div className="file-box-body">
+                    <div className="file-box-name" title={it.name}>{it.name}</div>
+                    {it.error && <div className="file-box-error" title={it.error}>{it.error}</div>}
+                    {it.status === "error" && (
+                      <button className="retry-btn" onClick={() => setItemStatus(it.id, "pending")}>
+                        Retry
+                      </button>
+                    )}
+                  </div>
                 </div>
-                <button className="file-box-x" onClick={() => removeItem(it.id)} title="Remove">×</button>
-                <div className="file-box-icon">📄</div>
-                <div className="file-box-name" title={it.name}>{it.name}</div>
-                <span className={`${STATUS[it.status].cls} file-status-badge`}>
-                  {STATUS[it.status].label}
-                </span>
-                {it.error && <div className="file-box-error" title={it.error}>{it.error}</div>}
-              </div>
-            ))}
-          </div>
-        )}
-
-        {queue.length > 0 && (
-          <div className="row gap queue-actions">
-            <div className="mini-stats">
-              <span className="badge pending">{counts.pending} pending</span>
-              <span className="badge done">{counts.done} done</span>
-              {counts.error > 0 && <span className="badge error">{counts.error} error</span>}
+              ))}
             </div>
-            <div className="row" style={{ marginLeft: "auto" }}>
-              <button className="btn primary" onClick={runAll} disabled={busy || !queue.length}>
-                {busy ? "Processing…" : "Extract all"}
-              </button>
-              <button className="btn ghost" onClick={clearAll} disabled={busy || !queue.length}>
-                Clear
-              </button>
-            </div>
+            <button className="btn ghost queue-clear" onClick={clearAll} disabled={busy || !queue.length}>
+              Clear
+            </button>
           </div>
         )}
       </section>
@@ -596,22 +558,8 @@ export default function App() {
         <div className="card-head">
           <h2>2 · Results {rows.length > 0 && <span className="count">({rows.length})</span>}</h2>
           <div className="row output-row">
-            <button className="btn" onClick={pickOutputPath} disabled={busy}>
-              📁 Choose output
-            </button>
-            <span className="output-path-display" title={outputPath}>
-              {outputPath || <span className="muted">No path chosen — will download</span>}
-            </span>
-            {outputPath && (
-              <button className="btn" onClick={saveToDisk} disabled={busy || !rows.length}>
-                Save to disk
-              </button>
-            )}
-            <button className="btn" onClick={copyToClipboard} disabled={busy || !rows.length}>
-              Copy
-            </button>
-            <button className="btn primary" onClick={downloadExcel} disabled={busy || !rows.length}>
-              Download .xlsx
+            <button className="btn primary" onClick={copyAllData} disabled={busy || !rows.length}>
+              📋 Copy
             </button>
           </div>
         </div>
@@ -636,7 +584,7 @@ export default function App() {
                       const raw = row[c] ?? "";
                       const hasLoc = !!(row._doc_id && row._locations?.[c]);
                       const verifyBadge = hasLoc ? (
-                        <span className="verify-badge" title="Hover to verify against the PDF">🔍</span>
+                        <span className="verify-badge" title="Click to open PDF">🔍</span>
                       ) : null;
                       const tdClass = (base) =>
                         (base ? base + " " : "") + (hasLoc ? "has-loc" : "");

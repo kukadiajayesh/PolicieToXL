@@ -74,12 +74,15 @@ Required keys (use "" if not found):
   "Party Name"          – full name of the insured person or entity
   "Insurance Company"   – full legal name of the insurer
   "Policy No."          – policy number / ID
-  "Reg Number"          – vehicle registration number (e.g. MH01AB1234)
+  "Reg Number"          – vehicle registration number exactly as printed in the document
   "Type of Insurance"   – policy type (e.g. Comprehensive, Third Party, etc.)
   "Premium"             – total premium including GST, digits only (no ₹ or commas)
   "Date Start"          – policy start date in DD/MM/YYYY
   "End Date"            – policy end date in DD/MM/YYYY
   "NCB (applied this yr)" – no-claim bonus % applied this year (e.g. "25%")
+
+Copy values exactly as they appear in the text. If a field is not present, use "" — \
+never guess or invent a value.
 
 Document text:
 {text}
@@ -94,12 +97,15 @@ Required keys (use "" if not found):
   "Party Name"          – full name of the insured person or entity
   "Insurance Company"   – full legal name of the insurer
   "Policy No."          – policy number / ID
-  "Reg Number"          – vehicle registration number (e.g. MH01AB1234)
-  "Type of Insurance"   – policy type (e.g. Comprehensive, Third Party, etc.)
-  "Premium"             – total premium including GST, digits only (no ₹ or commas)
+  "Reg Number"          – vehicle registration number
+  "Type of Insurance"   – policy type as printed on the document
+  "Premium"             – total premium including GST, digits only (no currency symbol or commas)
   "Date Start"          – policy start date in DD/MM/YYYY
   "End Date"            – policy end date in DD/MM/YYYY
-  "NCB (applied this yr)" – no-claim bonus % applied this year (e.g. "25%")
+  "NCB (applied this yr)" – no-claim bonus percentage applied this year
+
+Copy values exactly as printed in the image. If you cannot clearly read a \
+field, use "" — never guess or invent a value.
 """
 
 
@@ -254,7 +260,12 @@ def extract_fields_ollama_vision(pdf_path: str, model: str, url: str = OLLAMA_UR
         raise RuntimeError("requests library is required for Ollama extraction")
     if not model:
         raise ValueError("No Ollama model specified")
-    images = pdf_pages_to_b64(pdf_path, max_pages=_OLLAMA_VISION_MAX_PAGES)
+    max_pages = _OLLAMA_VISION_MAX_PAGES
+    if "moondream" in model.lower():
+        # moondream was trained on a single image; a second one just crowds its
+        # 2048-token context (each page ≈ 729 tokens) and degrades the answer.
+        max_pages = 1
+    images = pdf_pages_to_b64(pdf_path, max_pages=max_pages)
     if not images:
         raise RuntimeError("No pages could be rendered from the PDF for vision extraction")
     payload = {
@@ -266,6 +277,27 @@ def extract_fields_ollama_vision(pdf_path: str, model: str, url: str = OLLAMA_UR
     }
     logger.info("=== Ollama vision: %d page(s) -> %s ===", len(images), model)
     return _ollama_generate(payload, url, _OLLAMA_VISION_TIMEOUT)
+
+
+# Fields whose values appear verbatim in the document. Dates, premium and NCB
+# may be legitimately reformatted by the model (DD/MM/YYYY, digits only), so
+# they can't be checked by substring match.
+_ANCHOR_FIELDS = ("Party Name", "Insurance Company", "Policy No.", "Reg Number")
+
+
+def vision_row_is_credible(row: dict, text: str) -> bool:
+    """Cross-check a vision-extracted row against the PDF's text layer.
+
+    Small vision models often can't actually read a dense policy page and then
+    invent plausible-looking values (typically echoing the prompt's field
+    descriptions). When the PDF has a usable text layer we can catch that:
+    a credible row must have at least one verbatim anchor field that really
+    occurs in the document text (compared with spacing/punctuation/case
+    stripped, so line wraps and OCR-style spacing don't cause false negatives).
+    """
+    norm_text = _norm_token(text)
+    anchors = [_norm_token(row.get(k, "")) for k in _ANCHOR_FIELDS]
+    return any(a and a in norm_text for a in anchors)
 
 
 def read_document(pdf_path: str, want_words: bool = True) -> tuple[str, list[list[dict]]]:
@@ -395,27 +427,38 @@ def extract_fields(text: str) -> dict:
         party = first(r"\b(M(?:R|RS|S|/S)\.? [A-Z][A-Z .]+)", text)
 
     # ── INSURANCE COMPANY ────────────────────────────────────────────────
-    # Case-sensitive [A-Z] start avoids broker names (e.g. "probus insurance…")
     # Handles both Title Case and ALL CAPS variants of Insurance/Limited.
     # The {1,80} / {1,40} bounds are deliberate: these two overlapping char-class
     # runs straddle the required "insurance"/"assurance" literal and are the only
     # spot here where unbounded quantifiers could backtrack badly on a long line.
     # The caps are generous (insurer names are short) so real matches are intact.
-    insurer = first(
+    # Brokers/intermediaries ("PROBUS INSURANCE BROKER LTD") match the same shape
+    # and can appear before the insurer, so scan all matches and skip them.
+    insurer = ""
+    for m in re.finditer(
         r"([A-Z][A-Za-z& ]{1,80} (?:[Ii]nsurance|INSURANCE|[Aa]ssurance|ASSURANCE)"
         r"(?:[A-Za-z ]{1,40}?)?(?:[Cc]ompany |COMPANY )?(?:[Ll]imited|LIMITED|[Ll]td|LTD))",
         text,
-        flags=0,
-    )
-    if insurer:
-        insurer = re.sub(r"^(?:Welcome to |For )", "", insurer).strip()
+    ):
+        cand = m.group(1)
+        if re.search(r"\bbrok(?:er|ers|ing)\b", cand, re.IGNORECASE):
+            continue
+        # Drop boilerplate the match can start on: "Welcome to X", "Thank you for
+        # choosing X", "For X" (signature line), incl. a stray table token before it.
+        insurer = re.sub(
+            r"^(?:[A-Z]{1,3} )?(?:Welcome to |Thank you for choosing |For )", "", cand
+        ).strip()
+        break
 
     # ── REGISTRATION NUMBER ──────────────────────────────────────────────
     # Accepts "Registration No.", "Registration no :", "Vehicle Registration No." etc.
     reg = first(r"Registration [Nn]o\.?\s*:?\s*([A-Z]{2}[- ]?\d{1,2}[- ]?[A-Z]{1,3}[- ]?\d{3,4})", text)
 
     # ── TYPE OF INSURANCE ────────────────────────────────────────────────
-    ins_type = first(r"Motor Insurance\s*[-–]\s*([A-Za-z ]+?Policy)", text)
+    # Generali welcome letter: "We thank you for choosing Motor Secure insurance policy"
+    ins_type = first(r"for choosing ([A-Z][A-Za-z ]{2,40}?) insurance policy", text, flags=0)
+    if not ins_type:
+        ins_type = first(r"Motor Insurance\s*[-–]\s*([A-Za-z ]+?Policy)", text)
     if not ins_type:
         ins_type = first(r"(Motor Insurance[^\n]*Policy)", text)
     if not ins_type:
@@ -428,7 +471,8 @@ def extract_fields(text: str) -> dict:
     # ── PREMIUMS ─────────────────────────────────────────────────────────
     # HDFC ERGO (package premium breakdown)
     prem_no_gst = first(r"Total Package Premium\s*\(a\+b\)\s*([\d,]+)", text)
-    prem_gst = first(r"Total Premium\s*([\d,]+)", text)
+    # Generali prints "Total Premium (rounded off) 27,719.00"; HDFC just "Total Premium NNNN"
+    prem_gst = first(r"Total Premium\s*(?:\(rounded off\)\s*)?([\d,]+)", text)
     # Tata AIG / Probus: "Net Premium (A+B+C+D) ₹ NNNN"
     if not prem_no_gst:
         prem_no_gst = first(r"Net Premium\s*\([^)]+\)\s*[^\d]*([\d,]+)", text)
@@ -451,11 +495,19 @@ def extract_fields(text: str) -> dict:
     # Bajaj Home: "Total Premium (Before GST) N,NNN"
     if not prem_no_gst:
         prem_no_gst = first(r"Total Premium\s*\(Before GST\)\s*([\d,]+)", text)
+    # Generali tax invoice: "a sum of Rs. 27,719.00 towards Premium"
+    if not prem_gst:
+        prem_gst = first(r"sum of Rs\.?\s*([\d,]+)(?:\.\d+)?\s*towards Premium", text)
 
     # ── POLICY PERIOD ────────────────────────────────────────────────────
+    # Generali: "From 00:00 hours of DD/MM/YYYY To Midnight of DD/MM/YYYY"
+    date_start = first(r"From\s+\d{1,2}:\d{2}\s*[Hh](?:ou)?rs\.?\s*(?:of|on)?\s*(\d{2}/\d{2}/\d{4})", text)
+    if date_start:
+        date_end = first(r"Midnight of\s*(\d{2}/\d{2}/\d{4})", text)
     # HDFC ERGO: "From DD/MM/YYYY"
-    date_start = first(r"From\s+(\d{2}/\d{2}/\d{4})", text)
-    date_end = first(r"To\s+(\d{2}/\d{2}/\d{4})", text)
+    if not date_start:
+        date_start = first(r"From\s+(\d{2}/\d{2}/\d{4})", text)
+        date_end = first(r"To\s+(\d{2}/\d{2}/\d{4})", text)
     # Tata AIG (Jasani/liability): "From DD/MM/YYYY … To DD/MM/YYYY" in certificate
     if not date_start:
         date_start = first(r"From\s*:?\s*(\d{2}/\d{2}/\d{4})", text)
@@ -489,6 +541,9 @@ def extract_fields(text: str) -> dict:
     # Tata AIG: "NCB Claimed: 45 %" (fallback)
     if not ncb_applied:
         ncb_applied = first(r"NCB Claimed\s*:\s*(\d{1,2})\s*%", text)
+    # Generali schedule: "Renewal NCB % 0%"
+    if not ncb_applied:
+        ncb_applied = first(r"Renewal NCB\s*%?\s*(\d{1,2})\s*%", text)
     # HDFC ERGO: "NCB 20%" = previous policy NCB
     ncb_prev = first(r"\bNCB\s*(\d{1,2})\s*%", text)
     # Tata AIG: "NCB in Previous Policy: 35 %"

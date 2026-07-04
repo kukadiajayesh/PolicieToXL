@@ -17,13 +17,25 @@ written to a local path you choose.
 
 ## Run it
 
-The easy way:
+**macOS / Linux — one command** (installs/starts Ollama, creates `.venv`,
+installs Python deps, builds the React UI on first run, starts the server):
 
 ```bash
 ./run.sh
 ```
 
-Or manually:
+Or double-click **`Start Policy Extractor.command`** in Finder — it runs
+`run.sh` in the background and opens the browser automatically once the
+server is up.
+
+**Windows — one command** (PowerShell equivalent of `run.sh`):
+
+```powershell
+run.bat
+```
+(or right-click → Run with PowerShell on `run.ps1`)
+
+**Manual / any OS:**
 
 ```bash
 # 1. Python deps
@@ -37,6 +49,14 @@ python3 app.py
 ```
 
 Then open **http://127.0.0.1:5001**.
+
+**As a native desktop window** (no browser tab, uses pywebview):
+
+```bash
+python3 desktop.py
+```
+
+See `PACKAGING.md` for building a standalone `.app` / `.exe` / Linux binary.
 
 ## Using the UI
 

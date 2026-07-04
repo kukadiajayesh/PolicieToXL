@@ -71,8 +71,10 @@ from extract_policies import (
     extract_fields_ollama,
     extract_fields_ollama_vision,
     locate_fields,
+    vision_row_is_credible,
     _is_text_poor,
     _is_vision_model,
+    _LLM_FIELDS,
     ollama_status,
 )
 
@@ -285,16 +287,38 @@ def _do_extract(path: str, text: str, engine: str, model: str) -> dict:
     if engine == "ollama":
         if not model:
             raise ValueError("No Ollama model specified")
+        name = os.path.basename(path)
+        text_ok = not _is_text_poor(text)
         # Use the image path when the user picked a vision model, or when the
         # text layer is too poor for text extraction to work on its own.
-        if _is_vision_model(model) or _is_text_poor(text):
+        if _is_vision_model(model) or not text_ok:
             why = "vision model" if _is_vision_model(model) else "poor text layer"
-            logger.info("Using vision extraction for %s (%s)", os.path.basename(path), why)
+            logger.info("Using vision extraction for %s (%s)", name, why)
             try:
-                return extract_fields_ollama_vision(path, model)
+                row = extract_fields_ollama_vision(path, model)
+                # Small vision models that can't read the page fill the JSON
+                # with invented values. When the PDF has a good text layer we
+                # can verify the answer against it — and fall back to text
+                # extraction instead of returning fabricated data.
+                if not text_ok or vision_row_is_credible(row, text):
+                    return row
+                logger.warning(
+                    "Vision result for %s looks hallucinated (none of the "
+                    "extracted values appear in the PDF text); falling back "
+                    "to text extraction", name,
+                )
             except Exception as exc:
                 logger.warning("Vision extraction failed (%s), falling back to text", exc)
-        return extract_fields_ollama(text, model)
+        row = extract_fields_ollama(text, model)
+        if all(not row.get(k) for k in _LLM_FIELDS):
+            # Vision-only models (e.g. moondream) are poor text extractors and
+            # can come back completely empty — regex still yields real data.
+            logger.warning(
+                "Ollama text extraction with %s found no fields for %s; "
+                "using regex extraction instead", model, name,
+            )
+            return extract_fields(text)
+        return row
     return extract_fields(text)
 
 
@@ -402,6 +426,31 @@ def preview():
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": str(e)}), 500
     return send_file(io.BytesIO(png), mimetype="image/png")
+
+
+@app.route("/api/open-pdf", methods=["GET"])
+def open_pdf():
+    """Serve the full PDF file for viewing/downloading.
+
+    Query param: doc_id
+    Returns the PDF file so the browser can display or download it.
+    """
+    doc_id = request.args.get("doc_id", "")
+    with _DOC_LOCK:
+        path = _DOC_REGISTRY.get(doc_id)
+    if not path or not os.path.isfile(path):
+        return jsonify({"error": "Unknown document."}), 404
+    try:
+        # Get the filename for the download/save-as suggestion
+        filename = os.path.basename(path)
+        return send_file(
+            path,
+            mimetype="application/pdf",
+            as_attachment=False,  # Display inline in browser if possible
+            download_name=filename
+        )
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/export", methods=["POST"])
