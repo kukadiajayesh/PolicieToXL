@@ -1046,21 +1046,19 @@ export default function App() {
             <div className="settings-section">
               <div className="settings-section-head">
                 <h3>Gemini API key</h3>
-                {geminiKeyInfo?.key_set && (
-                  <label
-                    className="provider-toggle"
-                    title={geminiEnabled ? "Hide the Gemini engine" : "Show the Gemini engine"}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={geminiEnabled}
-                      disabled={geminiEnabledSaving}
-                      onChange={(e) => setGeminiEnabledRemote(e.target.checked)}
-                    />
-                    <span className="provider-toggle-track"><span className="provider-toggle-thumb" /></span>
-                    <span className="provider-toggle-label">{geminiEnabled ? "On" : "Off"}</span>
-                  </label>
-                )}
+                <label
+                  className="provider-toggle"
+                  title={geminiEnabled ? "Hide the Gemini engine" : "Show the Gemini engine"}
+                >
+                  <input
+                    type="checkbox"
+                    checked={geminiEnabled}
+                    disabled={geminiEnabledSaving || !geminiKeyInfo?.key_set}
+                    onChange={(e) => setGeminiEnabledRemote(e.target.checked)}
+                  />
+                  <span className="provider-toggle-track"><span className="provider-toggle-thumb" /></span>
+                  <span className="provider-toggle-label">{geminiEnabled ? "On" : "Off"}</span>
+                </label>
               </div>
               <p className="muted settings-hint">
                 Used by the <strong>Gemini</strong> engine. Stored locally in{" "}
@@ -1110,21 +1108,19 @@ export default function App() {
             <div className="settings-section">
               <div className="settings-section-head">
                 <h3>Claude API key</h3>
-                {claudeKeyInfo?.key_set && (
-                  <label
-                    className="provider-toggle"
-                    title={claudeEnabled ? "Hide the Claude engine" : "Show the Claude engine"}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={claudeEnabled}
-                      disabled={claudeEnabledSaving}
-                      onChange={(e) => setClaudeEnabledRemote(e.target.checked)}
-                    />
-                    <span className="provider-toggle-track"><span className="provider-toggle-thumb" /></span>
-                    <span className="provider-toggle-label">{claudeEnabled ? "On" : "Off"}</span>
-                  </label>
-                )}
+                <label
+                  className="provider-toggle"
+                  title={claudeEnabled ? "Hide the Claude engine" : "Show the Claude engine"}
+                >
+                  <input
+                    type="checkbox"
+                    checked={claudeEnabled}
+                    disabled={claudeEnabledSaving || !claudeKeyInfo?.key_set}
+                    onChange={(e) => setClaudeEnabledRemote(e.target.checked)}
+                  />
+                  <span className="provider-toggle-track"><span className="provider-toggle-thumb" /></span>
+                  <span className="provider-toggle-label">{claudeEnabled ? "On" : "Off"}</span>
+                </label>
               </div>
               <p className="muted settings-hint">
                 Used by the <strong>Claude</strong> engine. Stored locally in{" "}

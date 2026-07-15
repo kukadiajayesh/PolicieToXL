@@ -529,6 +529,24 @@ def extract_fields_gemini_vision(pdf_path: str, model: str, api_key: str) -> dic
     return _gemini_generate(parts, model, api_key)
 
 
+# Google's models endpoint still lists retired generations (e.g. gemini-2.0-*
+# now hard-404s with "no longer available") and specialty models that can't do
+# JSON field extraction. Keep the UI list to models that actually work.
+_GEMINI_MIN_VERSION = 2.5  # everything older is retired as of mid-2026
+_GEMINI_NON_TEXT = ("tts", "image", "robotics", "computer-use", "lyria", "omni")
+
+
+def _gemini_usable(name: str) -> bool:
+    """True when a listed Gemini model can serve text→JSON extraction."""
+    ln = name.lower()
+    if any(x in ln for x in _GEMINI_NON_TEXT):
+        return False
+    m = re.search(r"gemini-(\d+(?:\.\d+)?)", ln)
+    # Versionless aliases (gemini-flash-latest, gemini-pro-latest) are always
+    # current, so keep them.
+    return m is None or float(m.group(1)) >= _GEMINI_MIN_VERSION
+
+
 def _recommended_gemini(names: list[str]) -> str:
     """Pick the model to tag as "Recommended": the newest stable flash.
 
@@ -582,6 +600,8 @@ def gemini_status(api_key: str) -> dict:
             if "gemini" not in name.lower():
                 continue
             if "generateContent" not in (m.get("supportedGenerationMethods") or []):
+                continue
+            if not _gemini_usable(name):
                 continue
             names.append(name)
         # Flash models first — cheap and plenty for field extraction.

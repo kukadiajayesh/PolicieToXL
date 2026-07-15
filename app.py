@@ -161,38 +161,100 @@ def _augment_row(row: dict, pdf_path: str, copy: bool, pages_words=None, locatio
     return row
 
 
-# ── Gemini API key ──────────────────────────────────────────────────────────
-# The env var wins; otherwise a key saved from the UI is kept in a small config
-# file in the user's home directory so it survives restarts.
+# ── Secure API-key storage ──────────────────────────────────────────────────
+# The env var wins; otherwise keys saved from the UI live in the macOS
+# Keychain (encrypted at rest, gated by the user's login session) — never in
+# a plaintext file. Non-macOS platforms fall back to the config file, which
+# also holds non-secret settings like the per-provider on/off switches.
 _CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".pdfxl_config.json")
 _CONFIG_LOCK = threading.Lock()
+_KEYCHAIN_OK = sys.platform == "darwin"
+_KEYCHAIN_ACCOUNT = os.environ.get("USER") or "pdfxl"
+_GEMINI_KEYCHAIN_SERVICE = "pdfxl-gemini-api-key"
+_CLAUDE_KEYCHAIN_SERVICE = "pdfxl-anthropic-api-key"
 
 
-def _load_saved_gemini_key() -> str:
+def _keychain_get(service: str) -> str:
+    if not _KEYCHAIN_OK:
+        return ""
     try:
-        with open(_CONFIG_PATH, encoding="utf-8") as f:
-            return str(json.load(f).get("gemini_api_key") or "")
-    except (OSError, ValueError):
+        r = subprocess.run(
+            ["security", "find-generic-password",
+             "-s", service, "-a", _KEYCHAIN_ACCOUNT, "-w"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
         return ""
 
 
-def _save_gemini_key(key: str) -> None:
+def _keychain_set(service: str, key: str) -> bool:
+    """Store (or clear, when key is empty) a secret in the login keychain."""
+    if not _KEYCHAIN_OK:
+        return False
+    try:
+        if key:
+            cmd = ["security", "add-generic-password", "-U",
+                   "-s", service, "-a", _KEYCHAIN_ACCOUNT, "-w", key]
+        else:
+            cmd = ["security", "delete-generic-password",
+                   "-s", service, "-a", _KEYCHAIN_ACCOUNT]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        # Deleting an item that doesn't exist still means "key is cleared".
+        return r.returncode == 0 or not key
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _config_read() -> dict:
+    try:
+        with open(_CONFIG_PATH, encoding="utf-8") as f:
+            cfg = json.load(f)
+        return cfg if isinstance(cfg, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _config_write_key(config_key: str, key: str | None) -> None:
+    """Set (or drop, when None) one entry in the config file."""
     with _CONFIG_LOCK:
-        cfg = {}
-        try:
-            with open(_CONFIG_PATH, encoding="utf-8") as f:
-                cfg = json.load(f)
-            if not isinstance(cfg, dict):
-                cfg = {}
-        except (OSError, ValueError):
-            pass
-        cfg["gemini_api_key"] = key
+        cfg = _config_read()
+        if key is None:
+            if config_key not in cfg:
+                return
+            cfg.pop(config_key, None)
+        else:
+            cfg[config_key] = key
         with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
     try:
-        os.chmod(_CONFIG_PATH, 0o600)  # the file holds a secret
+        os.chmod(_CONFIG_PATH, 0o600)  # may still hold a secret on non-macOS
     except OSError:
         pass
+
+
+def _load_saved_key(service: str, config_key: str) -> str:
+    key = _keychain_get(service)
+    if key:
+        return key
+    # Legacy plaintext fallback (pre-Keychain saves / non-macOS platforms).
+    return str(_config_read().get(config_key) or "")
+
+
+def _save_key(service: str, config_key: str, key: str) -> None:
+    if _keychain_set(service, key):
+        _config_write_key(config_key, None)  # scrub any plaintext copy
+    else:
+        _config_write_key(config_key, key)  # non-macOS fallback
+
+
+# ── Gemini API key ──────────────────────────────────────────────────────────
+def _load_saved_gemini_key() -> str:
+    return _load_saved_key(_GEMINI_KEYCHAIN_SERVICE, "gemini_api_key")
+
+
+def _save_gemini_key(key: str) -> None:
+    _save_key(_GEMINI_KEYCHAIN_SERVICE, "gemini_api_key", key)
 
 
 def _gemini_key() -> str:
@@ -214,32 +276,13 @@ def _gemini_key_info() -> dict:
 
 
 # ── Claude (Anthropic) API key ──────────────────────────────────────────────
-# Same env-var-wins-then-saved-file pattern as the Gemini key above.
+# Same env-var-wins-then-Keychain pattern as the Gemini key above.
 def _load_saved_claude_key() -> str:
-    try:
-        with open(_CONFIG_PATH, encoding="utf-8") as f:
-            return str(json.load(f).get("anthropic_api_key") or "")
-    except (OSError, ValueError):
-        return ""
+    return _load_saved_key(_CLAUDE_KEYCHAIN_SERVICE, "anthropic_api_key")
 
 
 def _save_claude_key(key: str) -> None:
-    with _CONFIG_LOCK:
-        cfg = {}
-        try:
-            with open(_CONFIG_PATH, encoding="utf-8") as f:
-                cfg = json.load(f)
-            if not isinstance(cfg, dict):
-                cfg = {}
-        except (OSError, ValueError):
-            pass
-        cfg["anthropic_api_key"] = key
-        with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2)
-    try:
-        os.chmod(_CONFIG_PATH, 0o600)  # the file holds a secret
-    except OSError:
-        pass
+    _save_key(_CLAUDE_KEYCHAIN_SERVICE, "anthropic_api_key", key)
 
 
 def _claude_key() -> str:
