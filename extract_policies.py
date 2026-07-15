@@ -65,6 +65,21 @@ _OLLAMA_STATUS_TIMEOUT = _env_int("OLLAMA_STATUS_TIMEOUT", 5)
 # models (llava, minicpm-v).
 _OLLAMA_VISION_MAX_PAGES = _env_int("OLLAMA_VISION_MAX_PAGES", 2)
 
+# ── Gemini (Google AI) ──────────────────────────────────────────────────────
+# Cloud alternative to Ollama. Needs an API key (GEMINI_API_KEY / GOOGLE_API_KEY
+# env var, or one saved from the UI). Unlike the local path, text sent here
+# leaves the machine — the UI calls that out when the engine is selected.
+GEMINI_API_URL = (
+    os.environ.get("GEMINI_API_URL") or "https://generativelanguage.googleapis.com/v1beta"
+).rstrip("/")
+_GEMINI_TIMEOUT = _env_int("GEMINI_TIMEOUT", 120)
+_GEMINI_STATUS_TIMEOUT = _env_int("GEMINI_STATUS_TIMEOUT", 10)
+# Gemini's context is huge compared to local models, so allow far more text.
+_GEMINI_MAX_CHARS = _env_int("GEMINI_MAX_CHARS", 30000)
+# generateContent rejects inline payloads over ~20 MB; larger PDFs fall back
+# to rendered page images.
+_GEMINI_MAX_PDF_BYTES = 20 * 1024 * 1024
+
 _EXTRACT_PROMPT = """\
 You are an insurance document parser. Extract the following fields from the \
 policy document text below and return ONLY a valid JSON object — no markdown, \
@@ -76,6 +91,7 @@ Required keys (use "" if not found):
   "Policy No."          – policy number / ID
   "Reg Number"          – vehicle registration number exactly as printed in the document
   "Type of Insurance"   – policy type (e.g. Comprehensive, Third Party, etc.)
+  "Premium (Without GST)" – net/base premium before GST, digits only (no ₹ or commas)
   "Premium"             – total premium including GST, digits only (no ₹ or commas)
   "Date Start"          – policy start date in DD/MM/YYYY
   "End Date"            – policy end date in DD/MM/YYYY
@@ -99,6 +115,7 @@ Required keys (use "" if not found):
   "Policy No."          – policy number / ID
   "Reg Number"          – vehicle registration number
   "Type of Insurance"   – policy type as printed on the document
+  "Premium (Without GST)" – net/base premium before GST, digits only (no currency symbol or commas)
   "Premium"             – total premium including GST, digits only (no currency symbol or commas)
   "Date Start"          – policy start date in DD/MM/YYYY
   "End Date"            – policy end date in DD/MM/YYYY
@@ -122,6 +139,7 @@ _LLM_FIELDS = (
     "Policy No.",
     "Reg Number",
     "Type of Insurance",
+    "Premium (Without GST)",
     "Premium",
     "Date Start",
     "End Date",
@@ -363,6 +381,21 @@ def _is_vision_model(name: str) -> bool:
     return any(k in lower for k in _VISION_KEYWORDS)
 
 
+# Installed-model preference for the "Recommended" tag, best first. The top
+# entries read both the page image and plain text well; moondream is deliberately
+# absent (too weak for dense policy pages). If no vision model is installed the
+# strong text models follow, since regex/vision fallbacks cover scanned PDFs.
+_OLLAMA_PREFERRED = ("minicpm-v", "llava", "bakllava", "qwen2.5", "llama3", "gemma", "mistral")
+
+
+def _recommended_ollama(names: list[str]) -> str:
+    for pref in _OLLAMA_PREFERRED:
+        for n in names:
+            if pref in n.lower():
+                return n
+    return names[0] if names else ""
+
+
 def ollama_status(url: str = OLLAMA_URL) -> dict:
     """Return {"ok": True, "models": [...]} or {"ok": False, "error": "..."}."""
     if not _REQUESTS_OK:
@@ -371,9 +404,13 @@ def ollama_status(url: str = OLLAMA_URL) -> dict:
         r = _requests.get(f"{url}/api/tags", timeout=_OLLAMA_STATUS_TIMEOUT)
         r.raise_for_status()
         all_models = [m.get("name") for m in r.json().get("models", []) if m.get("name")]
+        rec = _recommended_ollama(all_models)
         # Text models first so the UI default lands on a text model.
         models = sorted(
-            [{"name": n, "vision": _is_vision_model(n)} for n in all_models],
+            [
+                {"name": n, "vision": _is_vision_model(n), "recommended": n == rec}
+                for n in all_models
+            ],
             key=lambda m: m["vision"],
         )
         return {"ok": True, "models": models}
@@ -393,20 +430,395 @@ def extract_fields_ollama(text: str, model: str, url: str = OLLAMA_URL) -> dict:
     return _ollama_generate(payload, url, _OLLAMA_TIMEOUT)
 
 
+def _gemini_generate(parts: list[dict], model: str, api_key: str, timeout: int = _GEMINI_TIMEOUT) -> dict:
+    """POST to Gemini's generateContent and return a normalized field dict.
+
+    Same contract as _ollama_generate: every failure mode (bad key, unknown
+    model, rate limit, network trouble, malformed body) becomes a RuntimeError
+    with a message the UI can show as-is.
+    """
+    if not _REQUESTS_OK:
+        raise RuntimeError("requests library is required for Gemini extraction")
+    if not api_key:
+        raise RuntimeError(
+            "No Gemini API key configured. Set GEMINI_API_KEY or save a key from the UI."
+        )
+    if not model:
+        raise ValueError("No Gemini model specified")
+    payload = {
+        "contents": [{"parts": parts}],
+        "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
+    }
+    url = f"{GEMINI_API_URL}/models/{model}:generateContent"
+    try:
+        r = _requests.post(
+            url, json=payload, headers={"x-goog-api-key": api_key}, timeout=timeout
+        )
+        r.raise_for_status()
+    except _requests.exceptions.ConnectionError:
+        raise RuntimeError("Cannot reach the Gemini API. Check your internet connection.")
+    except _requests.exceptions.Timeout:
+        raise RuntimeError(f"Gemini did not respond within {timeout}s.")
+    except _requests.exceptions.HTTPError as exc:
+        detail = ""
+        try:
+            detail = r.json().get("error", {}).get("message", "")
+        except (ValueError, AttributeError):
+            detail = (r.text or "").strip()[:200]
+        if r.status_code in (401, 403):
+            raise RuntimeError(f"Gemini rejected the API key: {detail or exc}")
+        if r.status_code == 404:
+            raise RuntimeError(f"Unknown Gemini model '{model}': {detail or exc}")
+        if r.status_code == 429:
+            raise RuntimeError(f"Gemini rate limit hit — wait a moment and retry: {detail or exc}")
+        raise RuntimeError(f"Gemini request failed: {detail or exc}")
+    except _requests.exceptions.RequestException as exc:
+        raise RuntimeError(f"Gemini request failed: {exc}")
+
+    try:
+        body = r.json()
+    except ValueError:
+        raise RuntimeError("Gemini returned a non-JSON response.")
+
+    try:
+        resp_parts = body["candidates"][0]["content"]["parts"]
+        raw = "".join(p.get("text", "") for p in resp_parts)
+    except (KeyError, IndexError, TypeError):
+        # A blocked prompt has promptFeedback instead of candidates.
+        reason = (body.get("promptFeedback") or {}).get("blockReason", "")
+        raise RuntimeError(
+            f"Gemini returned no answer{f' (blocked: {reason})' if reason else ''}."
+        )
+    logger.info("=== Gemini response ===\n%s", raw)
+    return _normalize_llm_fields(_parse_llm_json(raw))
+
+
+def extract_fields_gemini(text: str, model: str, api_key: str) -> dict:
+    """Ask a Gemini model to extract policy fields from the PDF's text layer."""
+    prompt = _EXTRACT_PROMPT.format(text=(text or "")[:_GEMINI_MAX_CHARS])
+    logger.info("=== Gemini text extraction -> %s ===", model)
+    return _gemini_generate([{"text": prompt}], model, api_key)
+
+
+def extract_fields_gemini_vision(pdf_path: str, model: str, api_key: str) -> dict:
+    """Use Gemini's multimodal input to extract fields from the PDF itself.
+
+    Gemini reads PDFs natively, so we send the raw file (better fidelity than
+    rendered screenshots). Oversized files fall back to rendered page images,
+    reusing the same cap as the Ollama vision path.
+    """
+    try:
+        size = os.path.getsize(pdf_path)
+    except OSError as exc:
+        raise RuntimeError(f"Could not read {os.path.basename(pdf_path)}: {exc}") from exc
+
+    parts: list[dict] = [{"text": _VISION_PROMPT}]
+    if size <= _GEMINI_MAX_PDF_BYTES:
+        with open(pdf_path, "rb") as f:
+            data = base64.b64encode(f.read()).decode()
+        parts.append({"inline_data": {"mime_type": "application/pdf", "data": data}})
+        logger.info("=== Gemini vision: whole PDF (%.1f KB) -> %s ===", size / 1024, model)
+    else:
+        images = pdf_pages_to_b64(pdf_path, max_pages=_OLLAMA_VISION_MAX_PAGES)
+        if not images:
+            raise RuntimeError("No pages could be rendered from the PDF for vision extraction")
+        parts.extend(
+            {"inline_data": {"mime_type": "image/jpeg", "data": img}} for img in images
+        )
+        logger.info("=== Gemini vision: %d page image(s) -> %s ===", len(images), model)
+    return _gemini_generate(parts, model, api_key)
+
+
+def _recommended_gemini(names: list[str]) -> str:
+    """Pick the model to tag as "Recommended": the newest stable flash.
+
+    Every Gemini model is multimodal, so flash is the sweet spot for field
+    extraction — it reads both text and page images accurately at a fraction
+    of pro's cost/latency. Prefer an exact stable "gemini-<ver>-flash" (newest
+    version); otherwise any flash that isn't a lite/preview/experimental spin.
+    """
+    best, best_ver = "", -1.0
+    for n in names:
+        m = re.fullmatch(r"gemini-(\d+(?:\.\d+)?)-flash", n)
+        if m and float(m.group(1)) > best_ver:
+            best, best_ver = n, float(m.group(1))
+    if best:
+        return best
+    for n in names:
+        ln = n.lower()
+        if "flash" in ln and not any(
+            x in ln for x in ("lite", "preview", "exp", "8b", "thinking")
+        ):
+            return n
+    return names[0] if names else ""
+
+
+def gemini_status(api_key: str) -> dict:
+    """Return {"ok": True, "models": [...]} or {"ok": False, "error": "..."}.
+
+    Mirrors ollama_status so the UI can treat both engines the same. Also
+    validates the key: a bad key fails the models list with a clear error.
+    """
+    if not _REQUESTS_OK:
+        return {"ok": False, "error": "requests library not installed"}
+    if not api_key:
+        return {"ok": False, "error": "No API key configured"}
+    try:
+        r = _requests.get(
+            f"{GEMINI_API_URL}/models",
+            params={"pageSize": 100},
+            headers={"x-goog-api-key": api_key},
+            timeout=_GEMINI_STATUS_TIMEOUT,
+        )
+        if not r.ok:
+            try:
+                detail = r.json().get("error", {}).get("message", "")
+            except (ValueError, AttributeError):
+                detail = ""
+            return {"ok": False, "error": detail or f"HTTP {r.status_code}"}
+        names = []
+        for m in r.json().get("models", []):
+            name = (m.get("name") or "").removeprefix("models/")
+            if "gemini" not in name.lower():
+                continue
+            if "generateContent" not in (m.get("supportedGenerationMethods") or []):
+                continue
+            names.append(name)
+        # Flash models first — cheap and plenty for field extraction.
+        names.sort(key=lambda n: ("flash" not in n, n))
+        rec = _recommended_gemini(names)
+        # Every current Gemini model is multimodal, hence vision: True.
+        return {
+            "ok": True,
+            "models": [
+                {"name": n, "vision": True, "recommended": n == rec} for n in names
+            ],
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+try:
+    import anthropic as _anthropic
+    _ANTHROPIC_OK = True
+except ImportError:
+    _ANTHROPIC_OK = False
+
+_ANTHROPIC_TIMEOUT = _env_int("ANTHROPIC_TIMEOUT", 120)
+# Claude's context is huge compared to local models, so allow far more text.
+_ANTHROPIC_MAX_CHARS = _env_int("ANTHROPIC_MAX_CHARS", 30000)
+# The Messages API rejects inline PDF payloads over ~32MB; larger PDFs fall
+# back to rendered page images, reusing the same cap as the other vision paths.
+_ANTHROPIC_MAX_PDF_BYTES = 20 * 1024 * 1024
+
+# Structured-outputs schema for the 9 policy fields — guarantees a valid JSON
+# object back from Claude with no markdown fences or stray prose to strip.
+_ANTHROPIC_SCHEMA = {
+    "type": "object",
+    "properties": {k: {"type": "string"} for k in _LLM_FIELDS},
+    "required": list(_LLM_FIELDS),
+    "additionalProperties": False,
+}
+
+
+def _anthropic_client(api_key: str):
+    if not _ANTHROPIC_OK:
+        raise RuntimeError(
+            "anthropic package is required for Claude extraction. Install it with: pip install anthropic"
+        )
+    if not api_key:
+        raise RuntimeError(
+            "No Claude API key configured. Set ANTHROPIC_API_KEY or save a key from the UI."
+        )
+    return _anthropic.Anthropic(api_key=api_key, timeout=_ANTHROPIC_TIMEOUT)
+
+
+def _anthropic_generate(content, model: str, api_key: str) -> dict:
+    """Send one Messages API request and return a normalized field dict.
+
+    Translates the noisy failure modes (bad key, unknown model, rate limit,
+    network trouble, refusal) into clear RuntimeError messages, mirroring
+    _ollama_generate/_gemini_generate so the UI can show them as-is.
+    """
+    if not model:
+        raise ValueError("No Claude model specified")
+    client = _anthropic_client(api_key)
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            output_config={"format": {"type": "json_schema", "schema": _ANTHROPIC_SCHEMA}},
+            messages=[{"role": "user", "content": content}],
+        )
+    except _anthropic.AuthenticationError:
+        raise RuntimeError("Claude rejected the API key.")
+    except _anthropic.NotFoundError as exc:
+        raise RuntimeError(f"Unknown Claude model '{model}': {exc.message}")
+    except _anthropic.RateLimitError as exc:
+        raise RuntimeError(f"Claude rate limit hit — wait a moment and retry: {exc.message}")
+    except _anthropic.APIConnectionError:
+        raise RuntimeError("Cannot reach the Claude API. Check your internet connection.")
+    except _anthropic.APIStatusError as exc:
+        raise RuntimeError(f"Claude request failed: {exc.message}")
+
+    if response.stop_reason == "refusal":
+        raise RuntimeError("Claude declined to process this document.")
+    raw = next((b.text for b in response.content if b.type == "text"), "")
+    logger.info("=== Claude response ===\n%s", raw)
+    return _normalize_llm_fields(_parse_llm_json(raw))
+
+
+def extract_fields_claude(text: str, model: str, api_key: str) -> dict:
+    """Ask a Claude model to extract policy fields from the PDF's text layer."""
+    prompt = _EXTRACT_PROMPT.format(text=(text or "")[:_ANTHROPIC_MAX_CHARS])
+    logger.info("=== Claude text extraction -> %s ===", model)
+    return _anthropic_generate(prompt, model, api_key)
+
+
+def extract_fields_claude_vision(pdf_path: str, model: str, api_key: str) -> dict:
+    """Use Claude's native PDF input to extract fields from the document itself.
+
+    Claude reads PDFs natively, so we send the raw file (better fidelity than
+    rendered screenshots). Oversized files fall back to rendered page images,
+    reusing the same cap as the Ollama/Gemini vision paths.
+    """
+    try:
+        size = os.path.getsize(pdf_path)
+    except OSError as exc:
+        raise RuntimeError(f"Could not read {os.path.basename(pdf_path)}: {exc}") from exc
+
+    content: list[dict] = []
+    if size <= _ANTHROPIC_MAX_PDF_BYTES:
+        with open(pdf_path, "rb") as f:
+            data = base64.b64encode(f.read()).decode()
+        content.append(
+            {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": data}}
+        )
+        logger.info("=== Claude vision: whole PDF (%.1f KB) -> %s ===", size / 1024, model)
+    else:
+        images = pdf_pages_to_b64(pdf_path, max_pages=_OLLAMA_VISION_MAX_PAGES)
+        if not images:
+            raise RuntimeError("No pages could be rendered from the PDF for vision extraction")
+        content.extend(
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img}}
+            for img in images
+        )
+        logger.info("=== Claude vision: %d page image(s) -> %s ===", len(images), model)
+    content.append({"type": "text", "text": _VISION_PROMPT})
+    return _anthropic_generate(content, model, api_key)
+
+
+def _recommended_claude(names: list[str]) -> str:
+    """Pick the model to tag as "Recommended": the flagship Opus model.
+
+    Every current Claude model is multimodal, so this is really about picking
+    the strongest general-purpose model for dense policy documents.
+    """
+    if "claude-opus-4-8" in names:
+        return "claude-opus-4-8"
+    for n in names:
+        if "opus" in n.lower():
+            return n
+    for n in names:
+        if "sonnet" in n.lower():
+            return n
+    return names[0] if names else ""
+
+
+def claude_status(api_key: str) -> dict:
+    """Return {"ok": True, "models": [...]} or {"ok": False, "error": "..."}.
+
+    Mirrors ollama_status/gemini_status so the UI can treat every engine the
+    same. Also validates the key: a bad key fails the models list.
+    """
+    if not _ANTHROPIC_OK:
+        return {"ok": False, "error": "anthropic package not installed"}
+    if not api_key:
+        return {"ok": False, "error": "No API key configured"}
+    try:
+        client = _anthropic.Anthropic(api_key=api_key, timeout=_ANTHROPIC_TIMEOUT)
+        names = [m.id for m in client.models.list()]
+    except Exception as exc:  # noqa: BLE001 — surface any auth/network failure to the UI
+        return {"ok": False, "error": str(exc)}
+    rec = _recommended_claude(names)
+    # Every current Claude model is multimodal, hence vision: True.
+    return {
+        "ok": True,
+        "models": [{"name": n, "vision": True, "recommended": n == rec} for n in names],
+    }
+
+
+# Indian vehicle-registration state/UT codes (anchors the plate regex so the
+# label-less fallback can't latch onto chassis numbers, CINs or UINs).
+_REG_STATE_CODES = (
+    "AN|AP|AR|AS|BR|CG|CH|DD|DL|DN|GA|GJ|HP|HR|JH|JK|KA|KL|LA|LD|MH|ML|MN|MP|"
+    "MZ|NL|OD|OR|PB|PY|RJ|SK|TN|TR|TS|UK|UP|WB"
+)
+
+
+def _first_amount(patterns, text: str) -> str:
+    """Return the first non-zero money match across an ordered pattern list.
+
+    Premium tables list several look-alike totals; trying patterns from most
+    to least specific and skipping zero rows (e.g. "Total Liability Premium
+    (B) 0.00" on an own-damage-only policy) keeps the wrong total from
+    shadowing the right one.
+    """
+    for pat in patterns:
+        val = first(pat, text)
+        if not val:
+            continue
+        try:
+            if float(val.replace(",", "")) > 0:
+                return val
+        except ValueError:
+            continue
+    return ""
+
+
 def extract_fields(text: str) -> dict:
-    """Pull the 9 fields out of the policy text."""
+    """Pull the policy fields out of the policy text."""
 
     # ── PARTY NAME ──────────────────────────────────────────────────────
-    # ICICI Lombard motor: "Name of the Insured [: ] NAME  Policy No."
-    party = first(r"Name of the Insured\s*:?\s*([A-Za-z][A-Za-z ]+?)(?:\s+Policy No\.|\s*\n)", text)
+    # Ordered from most-specific label to loosest fallback; each pattern is
+    # anchored on a label unique to one insurer family so a miss simply falls
+    # through to the next shape instead of grabbing a wrong line.
+    # ICICI Lombard motor / Magma: "Name of [the] Insured [: ] MR. NAME  [Policy No.]"
+    party = first(
+        r"Name of (?:the )?Insured\s*:?\s*([A-Za-z][A-Za-z. ]+?)(?=\s+Policy No|\s*\n)", text
+    )
     # ICICI commercial schedule: "NAMED INSURED   NAME"
     if not party:
         party = first(r"NAMED INSURED\s+([A-Z][A-Z& ]+?)\s*\n", text)
-    # Tata AIG new summary header: "Name [Mr.] FULL NAME Unlock ..." (full name on one line)
-    # This is tried BEFORE "Insured Name" because the certificate table wraps the name across lines.
+    # Shriram: "Insured's Code/ Name IN-12345 / M/S. NAME  GSTIN ..."
     if not party:
         party = first(
-            r"\bName\s+((?:(?:Mr\.|Mrs\.|Ms\.)\s*)?[A-Z][A-Za-z]+(?:\s+[A-Za-z]+){1,5}?)(?:\s+Unlock|\s*\n)",
+            r"Insured'?s Code\s*/\s*Name\s+\S+\s*/\s*([A-Za-z][A-Za-z./&' ]+?)(?=\s+GSTIN|\s*\n)",
+            text,
+        )
+    # Zuno: "Insured's Name: Mr. NAME Insured's GST No.: ..."
+    if not party:
+        party = first(
+            r"Insured'?s Name\s*:?\s*((?:M(?:r|rs|s)\.?\s*)?[A-Za-z][A-Za-z. ]+?)"
+            r"(?=\s+Insured'?s|\s*\n)",
+            text,
+        )
+    # Liberty: "Insured NAME Policy Issued on DD/MM/YYYY" — all on one line
+    # ([ \t]), so section headers like "INSURED DETAILS\nPolicy Issued" don't match.
+    if not party:
+        party = first(r"\bInsured[ \t]+([A-Z][A-Za-z. ]+?)[ \t]+Policy Issued", text)
+    # Go Digit: "Name NAME Vehicle Registration No. XX00XX0000"
+    if not party:
+        party = first(r"\bName[ \t]+([A-Z][A-Za-z. ]+?)[ \t]+Vehicle Registration", text)
+    # Tata AIG new summary header: "Name [Mr.] FULL NAME Unlock ..." (name stays
+    # on one line, hence [ \t]). This is tried BEFORE "Insured Name" because the
+    # certificate table wraps the name across lines. The lookbehinds keep
+    # agent/broker rows ("POSP Name ...", "Partner Name ...") out.
+    if not party:
+        party = first(
+            r"(?<!Intermediary )(?<!Insurer )(?<!Nominee )(?<!Agent )(?<!Partner )"
+            r"(?<!POSP )(?<!Holder )(?<!Bank )(?<!Proposer )"
+            r"\bName[ \t]+((?:(?:Mr\.|Mrs\.|Ms\.)\s*)?[A-Z][A-Za-z]+(?:[ \t]+[A-Za-z]+){1,5}?)(?:\s+Unlock|\s*\n)",
             text,
         )
     # Bajaj / Tata AIG old (certificate section): "Insured Name [: ] NAME  [Registration|...]"
@@ -416,6 +828,19 @@ def extract_fields(text: str) -> dict:
             r"(?=\s+(?:Registration|Policy|CC|Fuel|Mfg|Body|Zone)|\s*\n)",
             text,
         )
+    # SBI: "Name : [Mr.]NAME  Policy Servicing|Customer ID ..." — the lookbehinds
+    # keep broker/agent name rows ("Intermediary Name :", "Bank Name:...") out.
+    if not party:
+        party = first(
+            r"(?<!Intermediary )(?<!Nominee )(?<!Agent )(?<!Partner )(?<!POSP )"
+            r"(?<!Holder )(?<!Bank )(?<!Broker )"
+            r"\bName\s*:\s*((?:M(?:r|rs|s)\.?\s*)?[A-Za-z][A-Za-z.&/ ]+?)"
+            r"(?=\s+(?:Policy Servicing|Customer ID|Intermediary|Address|Contact|Email)|\s*\n)",
+            text,
+        )
+    # Chola: name sits on the line right below "Name&Communication Address:"
+    if not party:
+        party = first(r"Name\s*&\s*Communication Address:[^\n]*\n\s*([A-Z][A-Za-z. ]+?)\s*\n", text)
     # HDFC ERGO: name line ends just before "Registration No."
     if not party:
         party = first(r"\n([A-Z][A-Z .]+?)\s+Registration No\.", text)
@@ -425,6 +850,8 @@ def extract_fields(text: str) -> dict:
     # General salutation fallback
     if not party:
         party = first(r"\b(M(?:R|RS|S|/S)\.? [A-Z][A-Z .]+)", text)
+    # Some schedules print the salutation twice ("MRS MRS YUSRA ..."); collapse it.
+    party = re.sub(r"^((?:M/?S|MR|MRS)\.?\s+)\1+", r"\1", party, flags=re.IGNORECASE)
 
     # ── INSURANCE COMPANY ────────────────────────────────────────────────
     # Handles both Title Case and ALL CAPS variants of Insurance/Limited.
@@ -448,11 +875,26 @@ def extract_fields(text: str) -> dict:
         insurer = re.sub(
             r"^(?:[A-Z]{1,3} )?(?:Welcome to |Thank you for choosing |For )", "", cand
         ).strip()
+        # Some PDFs drop the spaces between words ("ICICI LombardGeneral
+        # InsuranceCompanyLimited"); re-insert them at case boundaries.
+        insurer = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", insurer)
         break
 
     # ── REGISTRATION NUMBER ──────────────────────────────────────────────
-    # Accepts "Registration No.", "Registration no :", "Vehicle Registration No." etc.
-    reg = first(r"Registration [Nn]o\.?\s*:?\s*([A-Z]{2}[- ]?\d{1,2}[- ]?[A-Z]{1,3}[- ]?\d{3,4})", text)
+    # Indian plate: <state code> <2-digit RTO> <1-3 letter series> <3-4 digits>.
+    # Restricting the leading pair to real state codes keeps the label-less
+    # fallback from matching chassis/CIN/UIN fragments.
+    reg_value = (
+        r"((?:" + _REG_STATE_CODES + r")[- ]?\d{1,2}[- ]?[A-Z]{1,3}[- ]?\d{3,4})"
+    )
+    # Labelled: "Registration No.", "Vehicle Registration No.", "Registration Mark:" etc.
+    reg = first(
+        r"Registration\s*(?:Mark|Number|No\.?)?\s*(?:&\s*No\.?)?\s*:?\s*" + reg_value, text
+    )
+    # Fallback: a bare plate anywhere (vehicle-details tables print it without an
+    # adjacent label). Case-sensitive so lowercase prose can't fake a plate.
+    if not reg:
+        reg = first(r"\b" + reg_value + r"\b", text, flags=0)
 
     # ── TYPE OF INSURANCE ────────────────────────────────────────────────
     # Generali welcome letter: "We thank you for choosing Motor Secure insurance policy"
@@ -463,55 +905,107 @@ def extract_fields(text: str) -> dict:
         ins_type = first(r"(Motor Insurance[^\n]*Policy)", text)
     if not ins_type:
         ins_type = first(r"^(Auto Secure\s*[-–]\s*[^\n]+?Policy)", text, flags=re.MULTILINE)
+    # Product headline naming the vehicle class. The class may wrap across a
+    # line break ("COMMERCIAL VEHICLE\nINSURANCE POLICY-PACKAGE"), hence \n in
+    # the bounded filler. "Insurance(?!\s+Policy)" keeps expanding through
+    # "... Insurance Policy" instead of stopping at the bare "Insurance".
+    # Candidates that grab half a parenthesis ("GOODS CARRYING) Policy") or a
+    # QR caption ("policy details") are layout noise — skip to the next hit.
     if not ins_type:
-        ins_type = first(r"((?:Two Wheeler|Private Car|Commercial Vehicle)[^\n]+?Policy)", text)
+        for m in re.finditer(
+            r"((?:Two[- ]?Wheeler|Private Car|Commercial Vehicle|Goods Carrying|"
+            r"Passenger Carrying)[A-Za-z ()&\n-]{0,60}?(?:Insurance(?!\s+Policy)|Policy(?!\s+details))\)?)",
+            text,
+            re.IGNORECASE,
+        ):
+            cand = re.sub(r"\s+", " ", m.group(1)).strip()
+            if cand.count("(") != cand.count(")") or re.search(r"\bdetails?\b", cand, re.IGNORECASE):
+                continue
+            ins_type = cand
+            break
+    # Bajaj non-motor: "Transcript of Proposal for FLEXI HOME SHIELD (UIN) ..."
+    if not ins_type:
+        ins_type = first(r"Transcript of Proposal for ([A-Z][A-Za-z /&-]+?)\s*\(\s*UIN", text)
     if not ins_type:
         ins_type = first(r"(Comprehensive General Liability Insurance)", text)
 
     # ── PREMIUMS ─────────────────────────────────────────────────────────
-    # HDFC ERGO (package premium breakdown)
-    prem_no_gst = first(r"Total Package Premium\s*\(a\+b\)\s*([\d,]+)", text)
-    # Generali prints "Total Premium (rounded off) 27,719.00"; HDFC just "Total Premium NNNN"
-    prem_gst = first(r"Total Premium\s*(?:\(rounded off\)\s*)?([\d,]+)", text)
-    # Tata AIG / Probus: "Net Premium (A+B+C+D) ₹ NNNN"
-    if not prem_no_gst:
-        prem_no_gst = first(r"Net Premium\s*\([^)]+\)\s*[^\d]*([\d,]+)", text)
-    if not prem_gst:
-        prem_gst = first(r"Total Policy Premium\s*[^\d]*([\d,.]+)", text)
-    # ICICI Motor (liability-only layout)
-    if not prem_no_gst:
-        prem_no_gst = first(r"Total Liability Premium\s*([\d,.]+)", text)
-    if not prem_gst:
-        prem_gst = first(r"Total Premium Payable In\s*[`₹]?\s*([\d,.]+)", text)
-    # ICICI Commercial: "PREMIUM (INCLUSIVE OF ALL\nX NNN\nAPPLICABLE TAXES) INR"
-    if not prem_gst:
-        prem_gst = first(r"PREMIUM\s*\(INCLUSIVE OF ALL\s*\n[^\d\n]*([\d,]+)", text)
-    # Tata AIG summary: "Premium Amount (Including GST) ₹ NNN"
-    if not prem_gst:
-        prem_gst = first(r"Premium [Aa]mount\s*\(Including GST\)\s*[₹]?\s*([\d,]+)", text)
-    # Bajaj Home: "Total Amount NNNN" (the settled payable amount)
-    if not prem_gst:
-        prem_gst = first(r"Total Amount\s*([\d,]+)", text)
-    # Bajaj Home: "Total Premium (Before GST) N,NNN"
-    if not prem_no_gst:
-        prem_no_gst = first(r"Total Premium\s*\(Before GST\)\s*([\d,]+)", text)
-    # Generali tax invoice: "a sum of Rs. 27,719.00 towards Premium"
-    if not prem_gst:
-        prem_gst = first(r"sum of Rs\.?\s*([\d,]+)(?:\.\d+)?\s*towards Premium", text)
+    # Ordered most-specific → generic; _first_amount skips zero-valued rows.
+    _AMT = r"([\d,]+(?:\.\d{1,2})?)"
+    # Premium before tax.
+    prem_no_gst = _first_amount(
+        (
+            # HDFC ERGO: "Total Package Premium (a+b) 19182"
+            r"Total Package Premium\s*\(a\+b\)\s*" + _AMT,
+            # Tata AIG "Net Premium (A+B+C+D) ₹", SBI "NET PREMIUM (A+B)",
+            # Digit "Net Premium (`) 714.00"
+            r"Net Premium\s*\([^)\n]{0,12}\)\s*[^\dA-Za-z\n]{0,8}" + _AMT,
+            # SBI package: "TOTAL PREMIUM (A+B) 46361.36"
+            r"TOTAL PREMIUM\s*\(A\+B\)\s*[^\d\n]{0,8}" + _AMT,
+            # Bajaj Home: "Total Premium (Before GST) 7,547/-"
+            r"Total Premium\s*\(Before GST\)\s*[^\d\n]{0,8}" + _AMT,
+            # Generali: "Total Premium for the Policy Period 23,490.60"
+            r"Total Premium for the Policy Period\s*[^\d\n]{0,8}" + _AMT,
+            # Shriram: "Gross Premium 91475 IGST 0" (pre-tax when a tax row follows)
+            r"Gross Premium\s+" + _AMT + r"\s*(?:Add\s*:?\s*)?(?:IGST|CGST|SGST)",
+            # ICICI / Magma / Zuno / Liberty: "Total Liability Premium ₹ 714.00"
+            r"Total Liability Premium\s*[^\dA-Za-z\n]{0,8}" + _AMT,
+            # Liberty / Bajaj motor: bare "Net Premium ` 714.00"
+            r"Net Premium\s*[^\dA-Za-z\n]{0,8}" + _AMT,
+            # Chola: "TOTAL CONSIDERATION 21,663.00"
+            r"TOTAL CONSIDERATION\s*[^\d\n]{0,8}" + _AMT,
+        ),
+        text,
+    )
+    # Premium including tax.
+    prem_gst = _first_amount(
+        (
+            # SBI: "Total Premium Collected 48992.90" / "Policy premium including Tax Rs. N"
+            r"Total Premium Collected\s*[^\d\n]{0,8}" + _AMT,
+            r"Policy premium including Tax\s*(?:Rs\.?)?\s*[^\d\n]{0,5}" + _AMT,
+            # Tata AIG summary: "Premium Amount (Including GST) ₹ NNN"
+            r"Premium Amount\s*\(Including GST\)\s*[₹`]?\s*" + _AMT,
+            # ICICI Motor: "Total Premium Payable In ` 843.00"
+            r"Total Premium Payable In\s*[`₹]?\s*" + _AMT,
+            # Digit / Zuno / Bajaj motor / SBI: "Final Premium 842.52"
+            r"Final Premium\s*[^\dA-Za-z\n]{0,8}" + _AMT,
+            # Shriram: "PREMIUM AMOUNT 102189.00"
+            r"PREMIUM AMOUNT\s*[^\dA-Za-z\n]{0,8}" + _AMT,
+            # Chola: "AMOUNT COLLECTED 23,465.00"
+            r"AMOUNT COLLECTED\s*[^\d\n]{0,8}" + _AMT,
+            # Tata AIG / Liberty: "TOTAL POLICY PREMIUM ` 843.00"
+            r"Total Policy Premium\s*[^\d\n]{0,8}" + _AMT,
+            # ICICI Commercial: "PREMIUM (INCLUSIVE OF ALL\nX NNN\nAPPLICABLE TAXES) INR"
+            r"PREMIUM\s*\(INCLUSIVE OF ALL\s*\n[^\d\n]*([\d,]+)",
+            # Generali tax invoice: "a sum of Rs. 27,719.00 towards Premium"
+            r"sum of Rs\.?\s*([\d,]+)(?:\.\d+)?\s*towards Premium",
+            # Generali "Total Premium (rounded off) 27,719.00"; HDFC "Total Premium NNNN".
+            # Digits must follow immediately — a looser filler would grab Generali's
+            # pre-tax "Total Premium for the Policy Period" line instead.
+            r"Total Premium\s*(?:\(rounded off\)\s*)?[`₹]?\s*" + _AMT,
+            # Magma: the grand-total row "TOTAL 4,787.00" under the GST lines
+            r"(?m)^TOTAL\s+([\d,]+\.\d{2})\s*$",
+            # Bajaj Home: "Gross Premium 8,905/-" (post-tax when nothing follows)
+            r"Gross Premium\s*[^\dA-Za-z\n]{0,8}" + _AMT,
+        ),
+        text,
+    )
 
     # ── POLICY PERIOD ────────────────────────────────────────────────────
-    # Generali: "From 00:00 hours of DD/MM/YYYY To Midnight of DD/MM/YYYY"
-    date_start = first(r"From\s+\d{1,2}:\d{2}\s*[Hh](?:ou)?rs\.?\s*(?:of|on)?\s*(\d{2}/\d{2}/\d{4})", text)
-    if date_start:
-        date_end = first(r"Midnight of\s*(\d{2}/\d{2}/\d{4})", text)
-    # HDFC ERGO: "From DD/MM/YYYY"
-    if not date_start:
-        date_start = first(r"From\s+(\d{2}/\d{2}/\d{4})", text)
-        date_end = first(r"To\s+(\d{2}/\d{2}/\d{4})", text)
-    # Tata AIG (Jasani/liability): "From DD/MM/YYYY … To DD/MM/YYYY" in certificate
+    # Generali / Magma / Shriram / Liberty / Zuno: a time-of-day precedes the
+    # date — "From 00:00 Hrs of DD/MM/YYYY", "From 12:01:00 of DD/MM/YYYY"
+    date_start = first(
+        r"\d{1,2}:\d{2}(?::\d{2})?\s*(?:[Hh](?:ou)?rs\.?)?\s+(?:of|on)\s+(\d{2}/\d{2}/\d{4})",
+        text,
+    )
+    date_end = ""
+    # HDFC ERGO / SBI: "From DD/MM/YYYY" ... "To DD/MM/YYYY"
     if not date_start:
         date_start = first(r"From\s*:?\s*(\d{2}/\d{2}/\d{4})", text)
         date_end = first(r"To\s*:?\s*(\d{2}/\d{2}/\d{4})", text)
+    # Magma letter: "Period of Insurance DD/MM/YYYY TO DD/MM/YYYY"
+    if not date_start:
+        date_start = first(r"Period [Oo]f Insurance\s*:?\s*(\d{2}/\d{2}/\d{4})\s*TO", text)
     # HDFC ERGO: "From D Mon, YYYY" style
     if not date_start:
         date_start = first(r"From\s+(\d{1,2} [A-Za-z]{3,9},? \d{4})", text)
@@ -530,10 +1024,29 @@ def extract_fields(text: str) -> dict:
         date_end = first(r"Midnight of ([A-Za-z]{3} \d{1,2}, \d{4})", text)
         if not date_end:
             date_end = first(r"\bto ([A-Za-z]{3} \d{1,2}, \d{4})", text)
-    # Bajaj-style: "FromDD-MON-YYYY To DD-MON-YYYY"
+    # Bajaj Home / Digit: "From DD-MON-YYYY To DD-MON-YYYY" (or DD-Mon-YYYY)
     if not date_start:
-        date_start = first(r"[Ff]rom\s*(\d{2}-[A-Z]{3}-\d{4})", text)
-        date_end = first(r"[Tt]o\s+(\d{2}-[A-Z]{3}-\d{4})", text)
+        date_start = first(r"[Ff]rom\s*(\d{1,2}-[A-Za-z]{3}-\d{4})", text)
+        date_end = first(r"[Tt]o\s+(\d{1,2}-[A-Za-z]{3}-\d{4})", text)
+    # Bajaj motor: "From 26-06-2026 00:00:00 to 25-06-2027 Midnight"
+    if not date_start:
+        date_start = first(r"From:?\s*(\d{2}-\d{2}-\d{4})", text)
+        date_end = first(r"[Tt]o:?\s*(\d{2}-\d{2}-\d{4})", text)
+    # A start without an end usually means the end date uses a different shape
+    # (e.g. Chola "from DD/MM/YYYY 00:00 hours to midnight on DD/MM/YYYY").
+    if date_start and not date_end:
+        for pat in (
+            # "To Midnight of DD/MM/YYYY" / "midnight on DD/MM/YYYY" / "Midnight Of ..."
+            r"Midnight\s*(?:of|on)?\s*:?\s*(\d{2}/\d{2}/\d{4})",
+            # Zuno: "to 23:59:59 of DD/MM/YYYY"
+            r"[Tt]o\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:of|on)\s*(\d{2}/\d{2}/\d{4})",
+            r"To\s*:?\s*(\d{2}/\d{2}/\d{4})",
+            # Watermark-garbled Digit PDFs: allow a little noise after "To"
+            r"To[^\n]{0,20}?(\d{1,2}-[A-Za-z]{3}-\d{4})",
+        ):
+            date_end = first(pat, text)
+            if date_end:
+                break
 
     # ── NCB ──────────────────────────────────────────────────────────────
     # HDFC ERGO: "No Claim Bonus 25 %" / Tata AIG: "No claim bonus (45%)"
@@ -544,6 +1057,12 @@ def extract_fields(text: str) -> dict:
     # Generali schedule: "Renewal NCB % 0%"
     if not ncb_applied:
         ncb_applied = first(r"Renewal NCB\s*%?\s*(\d{1,2})\s*%", text)
+    # Shriram: "NCB Discount (%) 50"
+    if not ncb_applied:
+        ncb_applied = first(r"NCB Discount\s*\(%\)\s*(\d{1,2})", text)
+    # Chola: "Bonus Discount (25%)"
+    if not ncb_applied:
+        ncb_applied = first(r"Bonus Discount\s*\(\s*(\d{1,2})\s*%\s*\)", text)
     # HDFC ERGO: "NCB 20%" = previous policy NCB
     ncb_prev = first(r"\bNCB\s*(\d{1,2})\s*%", text)
     # Tata AIG: "NCB in Previous Policy: 35 %"
@@ -551,7 +1070,20 @@ def extract_fields(text: str) -> dict:
         ncb_prev = first(r"NCB in Previous Policy\s*:\s*(\d{1,2})\s*%", text)
 
     # ── POLICY NUMBER ────────────────────────────────────────────────────
-    policy_no = first(r"Policy\s*(?:No\.?|Number)\s*:?\s*([A-Za-z0-9/.-]+(?:(?:\s+|/)[0-9]+){0,4})", text)
+    # The first token after the label must itself contain a digit, so filler
+    # words ("Policy No. is ...") and headings ("Renew Policy No") fall through
+    # to the next occurrence instead of being captured. "(?<!Previous )" keeps
+    # a renewal's old policy number from shadowing the current one.
+    _POLICY_VALUE = r"([A-Za-z0-9/.-]*\d[A-Za-z0-9/.-]*(?:(?:\s+|/)[0-9]+){0,4})"
+    policy_no = first(r"Policy\s*/\s*Certificate\s*No\.?\s*:?\s*" + _POLICY_VALUE, text)
+    if not policy_no:
+        policy_no = first(
+            r"(?<!Previous )Policy\s*(?:No\.?|Number)\s*:?\s*" + _POLICY_VALUE, text
+        )
+    if not policy_no:
+        policy_no = first(
+            r"(?<!Previous )Certificate\s*(?:No\.?|Number)\s*:?\s*" + _POLICY_VALUE, text
+        )
 
     return {
         "Party Name": party,
@@ -559,6 +1091,7 @@ def extract_fields(text: str) -> dict:
         "Policy No.": policy_no,
         "Reg Number": reg,
         "Type of Insurance": ins_type,
+        "Premium (Without GST)": prem_no_gst,
         "Premium": prem_gst,
         "Date Start": date_start,
         "End Date": date_end,
@@ -665,7 +1198,10 @@ def main():
     folder = sys.argv[1] if len(sys.argv) > 1 else "."
     out = sys.argv[2] if len(sys.argv) > 2 else "policies.xlsx"
 
-    pdfs = sorted(glob.glob(os.path.join(folder, "*.pdf")))
+    # Case-insensitive: schedules arrive as both "x.pdf" and "x.PDF".
+    pdfs = sorted(
+        p for p in glob.glob(os.path.join(folder, "*")) if p.lower().endswith(".pdf")
+    )
     if not pdfs:
         print(f"No PDFs found in {folder}")
         return

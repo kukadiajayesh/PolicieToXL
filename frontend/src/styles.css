@@ -242,7 +242,7 @@ body {
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 10px 34px 10px 10px;
-  overflow: hidden;
+  overflow: visible;
   display: flex;
   flex-direction: row;
   align-items: center;
@@ -308,6 +308,11 @@ body {
 
 .file-status-badge { font-size: 10px !important; padding: 2px 7px !important; }
 
+.file-box-error-wrap {
+  position: relative;
+  max-width: 100%;
+}
+
 .file-box-error {
   font-size: 9px;
   color: var(--red);
@@ -315,6 +320,32 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 100%;
+  cursor: help;
+}
+
+.file-box-error-tooltip {
+  display: none;
+  position: absolute;
+  z-index: 30;
+  left: 0;
+  bottom: calc(100% + 6px);
+  min-width: 200px;
+  max-width: 320px;
+  width: max-content;
+  white-space: normal;
+  word-break: break-word;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  box-shadow: 0 8px 24px var(--shadow-strong);
+}
+
+.file-box-error-wrap:hover .file-box-error-tooltip {
+  display: block;
 }
 
 .x {
@@ -475,12 +506,15 @@ td .cell:focus { background: var(--cell-focus); }
   padding: 4px 8px;
   border-radius: 7px;
   cursor: pointer;
-  max-width: 220px;
+  /* Wide enough for the kind icon + a readable model name + the recommended star. */
+  max-width: 240px;
   white-space: nowrap;
 }
 .model-select-btn:hover { background: var(--hover); }
 .model-kind { font-weight: 600; font-size: 12px; }
-.model-real-name { font-size: 9px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; max-width: 120px; }
+.model-kind-icon { font-size: 12px; line-height: 1; flex-shrink: 0; }
+.model-rec { color: var(--brand); font-size: 12px; line-height: 1; flex-shrink: 0; }
+.model-real-name { font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
 .model-chevron { font-size: 9px; color: var(--muted); margin-left: 2px; }
 .model-dropdown {
   position: absolute;
@@ -495,16 +529,97 @@ td .cell:focus { background: var(--cell-focus); }
   box-shadow: 0 6px 16px rgba(0,0,0,0.18);
   list-style: none;
   margin: 0;
+  /* Gemini can report 40+ models — keep the list inside the viewport. */
+  max-height: min(320px, 60vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
+.model-dropdown::-webkit-scrollbar { width: 8px; }
+.model-dropdown::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 4px;
+}
+.model-dropdown::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 .model-opt {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   padding: 6px 12px;
   cursor: pointer;
-  gap: 1px;
+  gap: 6px;
 }
 .model-opt:hover, .model-opt.selected { background: var(--hover); }
-.model-opt.selected .model-kind { color: var(--brand); }
+.model-opt.selected .model-real-name { color: var(--brand); }
+.gemini-key-row { display: flex; align-items: center; gap: 6px; }
+.gemini-key-input {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 7px;
+  width: 200px;
+}
+.gemini-key-input:focus { outline: none; border-color: var(--brand); }
+.key-save-btn {
+  background: transparent;
+  border: 1px solid var(--brand);
+  color: var(--brand);
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.key-save-btn:hover:not(:disabled) { background: var(--hover); }
+.key-save-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* Settings modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 10vh 16px 16px;
+}
+.modal-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+  width: 100%;
+  max-width: 520px;
+  padding: 18px 20px;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.modal-head h2 { margin: 0; font-size: 16px; }
+.settings-section { padding-top: 6px; }
+.settings-section h3 { margin: 0 0 6px; font-size: 13px; }
+.settings-hint { font-size: 12px; margin: 0 0 10px; line-height: 1.5; }
+.settings-hint code { font-size: 11px; }
+.settings-hint a { color: var(--brand); }
+.settings-key-current {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+.settings-key-masked {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 8px;
+}
+.settings-key-input { flex: 1; width: auto; }
+.engine-cloud-note { font-size: 11px; white-space: nowrap; }
 
 /* Date columns */
 .col-date { text-align: center; }

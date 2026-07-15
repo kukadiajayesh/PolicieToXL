@@ -141,6 +141,29 @@ extractable text (a scanned / image-only PDF).
 
 ---
 
+## Gemini (cloud AI extraction)
+
+The app can also use Google's Gemini API as a third engine. It is usually more
+accurate than small local models, but **unlike Regex and Ollama the document
+contents are sent to Google's servers** — don't use it for PDFs that must stay
+on the machine.
+
+1. Get an API key from [Google AI Studio](https://aistudio.google.com/apikey)
+   (there is a free tier).
+2. Switch the **Engine** toggle to *Gemini* and paste the key when prompted —
+   it is validated and saved to `~/.pdfxl_config.json` so you only do this
+   once. Alternatively set the `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
+   environment variable before starting the app.
+3. Pick a model from the dropdown (the *flash* models are fast, cheap and
+   plenty for field extraction) and extract as usual.
+
+PDFs with a good text layer are sent as text (first 30 000 characters,
+`GEMINI_MAX_CHARS` to change). Scanned / image-only PDFs are uploaded whole so
+Gemini can read the pages itself; files over 20 MB fall back to rendered page
+images.
+
+---
+
 ## Note on extraction accuracy
 
 The regex patterns in `extract_policies.py` are tuned for the **HDFC ERGO**

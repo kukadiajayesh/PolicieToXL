@@ -14,6 +14,7 @@ import os
 import io
 import sys
 import glob
+import json
 import uuid
 import queue
 import atexit
@@ -70,12 +71,18 @@ from extract_policies import (
     process_pdf,
     extract_fields_ollama,
     extract_fields_ollama_vision,
+    extract_fields_gemini,
+    extract_fields_gemini_vision,
+    extract_fields_claude,
+    extract_fields_claude_vision,
     locate_fields,
     vision_row_is_credible,
     _is_text_poor,
     _is_vision_model,
     _LLM_FIELDS,
     ollama_status,
+    gemini_status,
+    claude_status,
 )
 
 # When frozen by PyInstaller, bundled data lives under sys._MEIPASS. In a normal
@@ -91,6 +98,7 @@ COLUMNS = [
     "Policy No.",
     "Reg Number",
     "Type of Insurance",
+    "Premium (Without GST)",
     "Premium",
     "Date Start",
     "End Date",
@@ -151,6 +159,101 @@ def _augment_row(row: dict, pdf_path: str, copy: bool, pages_words=None, locatio
     row["_doc_id"] = doc_id
     row["_locations"] = locations
     return row
+
+
+# ── Gemini API key ──────────────────────────────────────────────────────────
+# The env var wins; otherwise a key saved from the UI is kept in a small config
+# file in the user's home directory so it survives restarts.
+_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".pdfxl_config.json")
+_CONFIG_LOCK = threading.Lock()
+
+
+def _load_saved_gemini_key() -> str:
+    try:
+        with open(_CONFIG_PATH, encoding="utf-8") as f:
+            return str(json.load(f).get("gemini_api_key") or "")
+    except (OSError, ValueError):
+        return ""
+
+
+def _save_gemini_key(key: str) -> None:
+    with _CONFIG_LOCK:
+        cfg = {}
+        try:
+            with open(_CONFIG_PATH, encoding="utf-8") as f:
+                cfg = json.load(f)
+            if not isinstance(cfg, dict):
+                cfg = {}
+        except (OSError, ValueError):
+            pass
+        cfg["gemini_api_key"] = key
+        with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+    try:
+        os.chmod(_CONFIG_PATH, 0o600)  # the file holds a secret
+    except OSError:
+        pass
+
+
+def _gemini_key() -> str:
+    return (
+        os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("GOOGLE_API_KEY")
+        or _load_saved_gemini_key()
+    )
+
+
+def _gemini_key_info() -> dict:
+    """Describe the configured key for the settings UI (never the key itself)."""
+    env_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    key = env_key or _load_saved_gemini_key()
+    if not key:
+        return {"key_set": False, "masked": "", "source": ""}
+    masked = key[:4] + "…" + key[-4:] if len(key) > 12 else "•••"
+    return {"key_set": True, "masked": masked, "source": "env" if env_key else "saved"}
+
+
+# ── Claude (Anthropic) API key ──────────────────────────────────────────────
+# Same env-var-wins-then-saved-file pattern as the Gemini key above.
+def _load_saved_claude_key() -> str:
+    try:
+        with open(_CONFIG_PATH, encoding="utf-8") as f:
+            return str(json.load(f).get("anthropic_api_key") or "")
+    except (OSError, ValueError):
+        return ""
+
+
+def _save_claude_key(key: str) -> None:
+    with _CONFIG_LOCK:
+        cfg = {}
+        try:
+            with open(_CONFIG_PATH, encoding="utf-8") as f:
+                cfg = json.load(f)
+            if not isinstance(cfg, dict):
+                cfg = {}
+        except (OSError, ValueError):
+            pass
+        cfg["anthropic_api_key"] = key
+        with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+    try:
+        os.chmod(_CONFIG_PATH, 0o600)  # the file holds a secret
+    except OSError:
+        pass
+
+
+def _claude_key() -> str:
+    return os.environ.get("ANTHROPIC_API_KEY") or _load_saved_claude_key()
+
+
+def _claude_key_info() -> dict:
+    """Describe the configured key for the settings UI (never the key itself)."""
+    env_key = os.environ.get("ANTHROPIC_API_KEY")
+    key = env_key or _load_saved_claude_key()
+    if not key:
+        return {"key_set": False, "masked": "", "source": ""}
+    masked = key[:4] + "…" + key[-4:] if len(key) > 12 else "•••"
+    return {"key_set": True, "masked": masked, "source": "env" if env_key else "saved"}
 
 
 # ── Extraction process pool ─────────────────────────────────────────────────
@@ -278,7 +381,10 @@ def scan():
     folder = os.path.expanduser(folder)
     if not folder or not os.path.isdir(folder):
         return jsonify({"error": f"Not a folder: {folder}"}), 400
-    pdfs = sorted(glob.glob(os.path.join(folder, "*.pdf")))
+    # Case-insensitive: schedules arrive as both "x.pdf" and "x.PDF".
+    pdfs = sorted(
+        p for p in glob.glob(os.path.join(folder, "*")) if p.lower().endswith(".pdf")
+    )
     files = [{"name": os.path.basename(p), "path": p} for p in pdfs]
     return jsonify({"files": files})
 
@@ -319,10 +425,44 @@ def _do_extract(path: str, text: str, engine: str, model: str) -> dict:
             )
             return extract_fields(text)
         return row
+    if engine == "gemini":
+        if not model:
+            raise ValueError("No Gemini model specified")
+        key = _gemini_key()
+        name = os.path.basename(path)
+        # Gemini models are all multimodal, so route on the text layer alone:
+        # good text goes as a (cheap, fast) text prompt, a poor/scanned layer
+        # sends the PDF itself.
+        if not _is_text_poor(text):
+            row = extract_fields_gemini(text, model, key)
+            if any(row.get(k) for k in _LLM_FIELDS):
+                return row
+            logger.warning(
+                "Gemini text extraction found no fields for %s; retrying with "
+                "the PDF itself", name,
+            )
+        return extract_fields_gemini_vision(path, model, key)
+    if engine == "claude":
+        if not model:
+            raise ValueError("No Claude model specified")
+        key = _claude_key()
+        name = os.path.basename(path)
+        # Every Claude model is multimodal, so route on the text layer alone,
+        # same as Gemini: good text goes as a cheap text prompt, a poor/scanned
+        # layer sends the PDF itself.
+        if not _is_text_poor(text):
+            row = extract_fields_claude(text, model, key)
+            if any(row.get(k) for k in _LLM_FIELDS):
+                return row
+            logger.warning(
+                "Claude text extraction found no fields for %s; retrying with "
+                "the PDF itself", name,
+            )
+        return extract_fields_claude_vision(path, model, key)
     return extract_fields(text)
 
 
-_ENGINES = ("regex", "ollama")
+_ENGINES = ("regex", "ollama", "gemini", "claude")
 
 
 def _extract_one(path, engine="regex", model=""):
@@ -343,6 +483,92 @@ def api_ollama_status():
     return jsonify(ollama_status())
 
 
+@app.route("/api/gemini/status", methods=["GET"])
+def api_gemini_status():
+    """Return Gemini availability (key configured + valid) and usable models."""
+    key = _gemini_key()
+    status = gemini_status(key)
+    status["key_set"] = bool(key)
+    return jsonify(status)
+
+
+@app.route("/api/gemini/key", methods=["GET", "POST", "DELETE"])
+def api_gemini_key():
+    """Manage the locally stored Gemini API key (settings UI).
+
+    GET    → masked description of the configured key (never the key itself).
+    POST   → validate {"api_key": ...} against Google and save it.
+    DELETE → forget the saved key (an env-var key cannot be removed from here).
+    """
+    if request.method == "GET":
+        return jsonify(_gemini_key_info())
+
+    if request.method == "DELETE":
+        try:
+            _save_gemini_key("")
+        except OSError as e:
+            return jsonify({"ok": False, "error": f"Could not update config: {e}"}), 500
+        return jsonify({"ok": True, **_gemini_key_info()})
+
+    data = request.get_json(silent=True) or {}
+    key = (data.get("api_key") or "").strip()
+    if not key:
+        return jsonify({"ok": False, "error": "Empty API key"}), 400
+    status = gemini_status(key)  # listing models doubles as key validation
+    if not status.get("ok"):
+        status.update(_gemini_key_info())
+        return jsonify(status), 400
+    try:
+        _save_gemini_key(key)
+    except OSError as e:
+        return jsonify({"ok": False, "error": f"Could not save key: {e}"}), 500
+    status.update(_gemini_key_info())
+    return jsonify(status)
+
+
+@app.route("/api/claude/status", methods=["GET"])
+def api_claude_status():
+    """Return Claude availability (key configured + valid) and usable models."""
+    key = _claude_key()
+    status = claude_status(key)
+    status["key_set"] = bool(key)
+    return jsonify(status)
+
+
+@app.route("/api/claude/key", methods=["GET", "POST", "DELETE"])
+def api_claude_key():
+    """Manage the locally stored Claude (Anthropic) API key (settings UI).
+
+    GET    → masked description of the configured key (never the key itself).
+    POST   → validate {"api_key": ...} against Anthropic and save it.
+    DELETE → forget the saved key (an env-var key cannot be removed from here).
+    """
+    if request.method == "GET":
+        return jsonify(_claude_key_info())
+
+    if request.method == "DELETE":
+        try:
+            _save_claude_key("")
+        except OSError as e:
+            return jsonify({"ok": False, "error": f"Could not update config: {e}"}), 500
+        return jsonify({"ok": True, **_claude_key_info()})
+
+    data = request.get_json(silent=True) or {}
+    key = (data.get("api_key") or "").strip()
+    if not key:
+        return jsonify({"ok": False, "error": "Empty API key"}), 400
+    status = claude_status(key)  # listing models doubles as key validation
+    if not status.get("ok"):
+        status.update(_claude_key_info())
+        return jsonify(status), 400
+    try:
+        _save_claude_key(key)
+    except OSError as e:
+        return jsonify({"ok": False, "error": f"Could not save key: {e}"}), 500
+    status.update(_claude_key_info())
+    return jsonify(status)
+
+
 @app.route("/api/extract", methods=["POST"])
 def extract():
     """
@@ -350,7 +576,7 @@ def extract():
 
     Accepts either a multipart upload (field name "file") for drag-and-dropped
     files, or JSON {"path": "/abs/path.pdf"} for files already on disk.
-    Optional fields: "engine" ("regex"|"ollama"), "model" (Ollama model name).
+    Optional fields: "engine" ("regex"|"ollama"|"gemini"|"claude"), "model" (model name).
     """
     # multipart upload (drag & drop)
     if "file" in request.files:

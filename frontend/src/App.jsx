@@ -14,8 +14,17 @@ function ModelDropdown({ models, value, onChange }) {
   return (
     <div className="model-select-wrap" ref={ref}>
       <button className="model-select-btn" onClick={() => setOpen((v) => !v)} type="button">
-        <span className="model-kind">{selected ? (selected.vision ? "Image Based" : "Text Based") : "Select model"}</span>
-        {selected && <span className="model-real-name">{selected.name}</span>}
+        {selected ? (
+          <>
+            <span className="model-kind-icon" title={selected.vision ? "Image Based" : "Text Based"}>
+              {selected.vision ? "🖼" : "📝"}
+            </span>
+            <span className="model-real-name">{selected.name}</span>
+            {selected.recommended && <span className="model-rec" title="Recommended">★</span>}
+          </>
+        ) : (
+          <span className="model-kind">Select model</span>
+        )}
         <span className="model-chevron">{open ? "▴" : "▾"}</span>
       </button>
       {open && (
@@ -26,8 +35,11 @@ function ModelDropdown({ models, value, onChange }) {
               className={"model-opt" + (m.name === value ? " selected" : "")}
               onClick={() => { onChange(m.name); setOpen(false); }}
             >
-              <span className="model-kind">{m.vision ? "Image Based" : "Text Based"}</span>
+              <span className="model-kind-icon" title={m.vision ? "Image Based" : "Text Based"}>
+                {m.vision ? "🖼" : "📝"}
+              </span>
               <span className="model-real-name">{m.name}</span>
+              {m.recommended && <span className="model-rec" title="Recommended">★</span>}
             </li>
           ))}
         </ul>
@@ -36,7 +48,7 @@ function ModelDropdown({ models, value, onChange }) {
   );
 }
 
-const AMOUNT_COLS = new Set(["Premium"]);
+const AMOUNT_COLS = new Set(["Premium", "Premium (Without GST)"]);
 const DATE_COLS = new Set(["Date Start", "End Date"]);
 const CAMEL_COLS = new Set(["Party Name", "Type of Insurance"]);
 
@@ -87,6 +99,7 @@ const COLUMNS = [
   "Policy No.",
   "Reg Number",
   "Type of Insurance",
+  "Premium (Without GST)",
   "Premium",
   "Date Start",
   "End Date",
@@ -103,6 +116,10 @@ const STATUS = {
 
 let _id = 0;
 const uid = () => ++_id;
+
+// Default model pick when none is selected yet: recommended one, else first.
+const pickDefaultModel = (models) =>
+  models?.find((m) => m.recommended)?.name || models?.[0]?.name || "";
 
 const THEME_ORDER = ["system", "light", "dark"];
 const THEME_META = {
@@ -125,6 +142,23 @@ export default function App() {
   const [ollamaModel, setOllamaModel] = useState("");
   const [ollamaStatus, setOllamaStatus] = useState(null); // null | "checking" | "ok" | "error"
   const [ollamaError, setOllamaError] = useState("");
+  const [geminiModels, setGeminiModels] = useState([]);
+  const [geminiModel, setGeminiModel] = useState("");
+  const [geminiStatus, setGeminiStatus] = useState(null); // null | "checking" | "ok" | "no-key" | "error"
+  const [geminiError, setGeminiError] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [geminiKeyInfo, setGeminiKeyInfo] = useState(null); // {key_set, masked, source}
+  const [geminiKeyInput, setGeminiKeyInput] = useState("");
+  const [geminiSavingKey, setGeminiSavingKey] = useState(false);
+  const [geminiKeyError, setGeminiKeyError] = useState("");
+  const [claudeModels, setClaudeModels] = useState([]);
+  const [claudeModel, setClaudeModel] = useState("");
+  const [claudeStatus, setClaudeStatus] = useState(null); // null | "checking" | "ok" | "no-key" | "error"
+  const [claudeError, setClaudeError] = useState("");
+  const [claudeKeyInfo, setClaudeKeyInfo] = useState(null); // {key_set, masked, source}
+  const [claudeKeyInput, setClaudeKeyInput] = useState("");
+  const [claudeSavingKey, setClaudeSavingKey] = useState(false);
+  const [claudeKeyError, setClaudeKeyError] = useState("");
   const [logs, setLogs] = useState([]);
   const [logsOpen, setLogsOpen] = useState(false);
   const [preview, setPreview] = useState(null); // {url, x, y, col, loading}
@@ -162,7 +196,7 @@ export default function App() {
         const data = await res.json();
         if (data.ok) {
           setOllamaModels(data.models || []);
-          setOllamaModel((m) => m || data.models?.[0]?.name || "");
+          setOllamaModel((m) => m || pickDefaultModel(data.models));
           setOllamaStatus("ok");
           if (setDefault) setEngine("ollama");
           return;
@@ -179,6 +213,187 @@ export default function App() {
   // On mount: probe Ollama (patiently — it may still be booting) and default
   // to it if available.
   useEffect(() => { checkOllama({ setDefault: true, attempts: 5 }); }, []);
+
+  // fetch + JSON parse with useful failures: a network error keeps the classic
+  // "could not reach" message, while a non-JSON body (e.g. the HTML 404/405 an
+  // outdated backend returns for routes it doesn't know) says to restart the
+  // app instead of pretending the server is down.
+  const fetchJson = async (url, opts) => {
+    let res;
+    try {
+      res = await fetch(url, opts);
+    } catch {
+      throw new Error("Could not reach the server — is the app still running?");
+    }
+    try {
+      return { res, data: await res.json() };
+    } catch {
+      throw new Error(
+        `Unexpected server response (HTTP ${res.status}) — the backend looks ` +
+        "outdated; restart the app to load the latest code."
+      );
+    }
+  };
+
+  const applyGeminiStatus = (data) => {
+    if (data.ok) {
+      setGeminiModels(data.models || []);
+      setGeminiModel((m) => m || pickDefaultModel(data.models));
+      setGeminiStatus("ok");
+      return;
+    }
+    setGeminiError(data.error || "Gemini not reachable");
+    setGeminiStatus(data.key_set ? "error" : "no-key");
+  };
+
+  const checkGemini = async () => {
+    setGeminiStatus("checking");
+    setGeminiError("");
+    try {
+      const { data } = await fetchJson("/api/gemini/status");
+      applyGeminiStatus(data);
+    } catch (err) {
+      setGeminiError(err.message);
+      setGeminiStatus("error");
+    }
+  };
+
+  const applyClaudeStatus = (data) => {
+    if (data.ok) {
+      setClaudeModels(data.models || []);
+      setClaudeModel((m) => m || pickDefaultModel(data.models));
+      setClaudeStatus("ok");
+      return;
+    }
+    setClaudeError(data.error || "Claude not reachable");
+    setClaudeStatus(data.key_set ? "error" : "no-key");
+  };
+
+  const checkClaude = async () => {
+    setClaudeStatus("checking");
+    setClaudeError("");
+    try {
+      const { data } = await fetchJson("/api/claude/status");
+      applyClaudeStatus(data);
+    } catch (err) {
+      setClaudeError(err.message);
+      setClaudeStatus("error");
+    }
+  };
+
+  const openSettings = async () => {
+    setSettingsOpen(true);
+    setGeminiKeyError("");
+    setGeminiKeyInput("");
+    setClaudeKeyError("");
+    setClaudeKeyInput("");
+    try {
+      const { data } = await fetchJson("/api/gemini/key");
+      setGeminiKeyInfo(data);
+    } catch (err) {
+      setGeminiKeyInfo(null);
+      setGeminiKeyError(err.message);
+    }
+    try {
+      const { data } = await fetchJson("/api/claude/key");
+      setClaudeKeyInfo(data);
+    } catch (err) {
+      setClaudeKeyInfo(null);
+      setClaudeKeyError(err.message);
+    }
+  };
+
+  const saveGeminiKey = async () => {
+    const key = geminiKeyInput.trim();
+    if (!key) return;
+    setGeminiSavingKey(true);
+    setGeminiKeyError("");
+    try {
+      const { data } = await fetchJson("/api/gemini/key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: key }),
+      });
+      if (data.ok) {
+        setGeminiKeyInput("");
+        setGeminiKeyInfo({ key_set: data.key_set, masked: data.masked, source: data.source });
+        applyGeminiStatus(data);
+        flash("Gemini API key saved.", "info");
+      } else {
+        setGeminiKeyError(data.error || "Key was rejected");
+      }
+    } catch (err) {
+      setGeminiKeyError(err.message);
+    } finally {
+      setGeminiSavingKey(false);
+    }
+  };
+
+  const removeGeminiKey = async () => {
+    setGeminiKeyError("");
+    try {
+      const { data } = await fetchJson("/api/gemini/key", { method: "DELETE" });
+      if (!data.ok) {
+        setGeminiKeyError(data.error || "Could not remove key");
+        return;
+      }
+      setGeminiKeyInfo({ key_set: data.key_set, masked: data.masked, source: data.source });
+      // Env-var keys survive removal of the saved one, so re-probe instead of
+      // assuming Gemini is now unconfigured.
+      setGeminiModel("");
+      setGeminiModels([]);
+      checkGemini();
+      flash("Saved Gemini API key removed.", "info");
+    } catch (err) {
+      setGeminiKeyError(err.message);
+    }
+  };
+
+  const saveClaudeKey = async () => {
+    const key = claudeKeyInput.trim();
+    if (!key) return;
+    setClaudeSavingKey(true);
+    setClaudeKeyError("");
+    try {
+      const { data } = await fetchJson("/api/claude/key", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: key }),
+      });
+      if (data.ok) {
+        setClaudeKeyInput("");
+        setClaudeKeyInfo({ key_set: data.key_set, masked: data.masked, source: data.source });
+        applyClaudeStatus(data);
+        flash("Claude API key saved.", "info");
+      } else {
+        setClaudeKeyError(data.error || "Key was rejected");
+      }
+    } catch (err) {
+      setClaudeKeyError(err.message);
+    } finally {
+      setClaudeSavingKey(false);
+    }
+  };
+
+  const removeClaudeKey = async () => {
+    setClaudeKeyError("");
+    try {
+      const { data } = await fetchJson("/api/claude/key", { method: "DELETE" });
+      if (!data.ok) {
+        setClaudeKeyError(data.error || "Could not remove key");
+        return;
+      }
+      setClaudeKeyInfo({ key_set: data.key_set, masked: data.masked, source: data.source });
+      // Env-var keys survive removal of the saved one, so re-probe instead of
+      // assuming Claude is now unconfigured.
+      setClaudeModel("");
+      setClaudeModels([]);
+      checkClaude();
+      flash("Saved Claude API key removed.", "info");
+    } catch (err) {
+      setClaudeKeyError(err.message);
+    }
+  };
 
   // SSE log stream
   useEffect(() => {
@@ -199,6 +414,12 @@ export default function App() {
   useEffect(() => {
     if (engine === "ollama" && ollamaStatus !== "ok" && ollamaStatus !== "checking") {
       checkOllama({ attempts: 2 });
+    }
+    if (engine === "gemini" && geminiStatus !== "ok" && geminiStatus !== "checking") {
+      checkGemini();
+    }
+    if (engine === "claude" && claudeStatus !== "ok" && claudeStatus !== "checking") {
+      checkClaude();
     }
   }, [engine]);
 
@@ -249,17 +470,22 @@ export default function App() {
     setItemStatus(item.id, "reading");
     try {
       let res;
+      const model =
+        engine === "ollama" ? ollamaModel
+        : engine === "gemini" ? geminiModel
+        : engine === "claude" ? claudeModel
+        : "";
       if (item.file) {
         const fd = new FormData();
         fd.append("file", item.file, item.name);
         fd.append("engine", engine);
-        if (engine === "ollama") fd.append("model", ollamaModel);
+        if (model) fd.append("model", model);
         res = await fetch("/api/extract", { method: "POST", body: fd });
       } else {
         res = await fetch("/api/extract", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: item.path, engine, model: engine === "ollama" ? ollamaModel : "" }),
+          body: JSON.stringify({ path: item.path, engine, model }),
         });
       }
       let data;
@@ -294,7 +520,9 @@ export default function App() {
     const order = new Map(queue.map((it, i) => [it.id, i]));
     // Regex extraction is CPU-bound in the backend, so a few PDFs in flight at
     // once overlap nicely; Ollama runs one generation at a time, keep it serial.
-    const limit = engine === "ollama" ? 1 : 3;
+    // Gemini/Claude are cloud APIs — a little concurrency is fine, but stay
+    // under typical rate limits.
+    const limit = engine === "ollama" ? 1 : engine === "gemini" || engine === "claude" ? 2 : 3;
     let next = 0;
     const worker = async () => {
       while (next < targets.length) {
@@ -440,6 +668,10 @@ export default function App() {
             <span className="t-icon">{THEME_META[theme].icon}</span>
             {THEME_META[theme].label}
           </button>
+          <button className="theme-toggle" onClick={openSettings} title="Settings">
+            <span className="t-icon">⚙</span>
+            Settings
+          </button>
           <span className="offline-pill">● Local only</span>
         </div>
       </header>
@@ -459,6 +691,14 @@ export default function App() {
                 className={"engine-btn" + (engine === "ollama" ? " active" : "")}
                 onClick={() => setEngine("ollama")}
               >Ollama</button>
+              <button
+                className={"engine-btn" + (engine === "gemini" ? " active" : "")}
+                onClick={() => setEngine("gemini")}
+              >Gemini</button>
+              <button
+                className={"engine-btn" + (engine === "claude" ? " active" : "")}
+                onClick={() => setEngine("claude")}
+              >Claude</button>
             </div>
             {engine === "ollama" && (
               <div className="ollama-config">
@@ -478,6 +718,68 @@ export default function App() {
                     value={ollamaModel}
                     onChange={setOllamaModel}
                   />
+                )}
+              </div>
+            )}
+            {engine === "gemini" && (
+              <div className="ollama-config">
+                {geminiStatus === "checking" && <span className="muted">Checking…</span>}
+                {geminiStatus === "no-key" && (
+                  <span className="gemini-key-row">
+                    <span className="ollama-err">✕ No API key</span>
+                    <button className="key-save-btn" onClick={openSettings}>
+                      ⚙ Add key in Settings
+                    </button>
+                  </span>
+                )}
+                {geminiStatus === "error" && (
+                  <span className="ollama-err" title={geminiError}>
+                    ✕ {geminiError || "Not reachable"}
+                    <button className="retry-btn" onClick={checkGemini}>Retry</button>
+                  </span>
+                )}
+                {geminiStatus === "ok" && (
+                  <>
+                    <ModelDropdown
+                      models={geminiModels}
+                      value={geminiModel}
+                      onChange={setGeminiModel}
+                    />
+                    <span className="muted engine-cloud-note" title="Unlike Regex/Ollama, the Gemini engine sends document contents to Google's API.">
+                      ☁ sends PDFs to Google
+                    </span>
+                  </>
+                )}
+              </div>
+            )}
+            {engine === "claude" && (
+              <div className="ollama-config">
+                {claudeStatus === "checking" && <span className="muted">Checking…</span>}
+                {claudeStatus === "no-key" && (
+                  <span className="gemini-key-row">
+                    <span className="ollama-err">✕ No API key</span>
+                    <button className="key-save-btn" onClick={openSettings}>
+                      ⚙ Add key in Settings
+                    </button>
+                  </span>
+                )}
+                {claudeStatus === "error" && (
+                  <span className="ollama-err" title={claudeError}>
+                    ✕ {claudeError || "Not reachable"}
+                    <button className="retry-btn" onClick={checkClaude}>Retry</button>
+                  </span>
+                )}
+                {claudeStatus === "ok" && (
+                  <>
+                    <ModelDropdown
+                      models={claudeModels}
+                      value={claudeModel}
+                      onChange={setClaudeModel}
+                    />
+                    <span className="muted engine-cloud-note" title="Unlike Regex/Ollama, the Claude engine sends document contents to Anthropic's API.">
+                      ☁ sends PDFs to Anthropic
+                    </span>
+                  </>
                 )}
               </div>
             )}
@@ -536,7 +838,12 @@ export default function App() {
                   <div className="file-box-icon">📄</div>
                   <div className="file-box-body">
                     <div className="file-box-name" title={it.name}>{it.name}</div>
-                    {it.error && <div className="file-box-error" title={it.error}>{it.error}</div>}
+                    {it.error && (
+                      <div className="file-box-error-wrap">
+                        <div className="file-box-error">{it.error}</div>
+                        <div className="file-box-error-tooltip">{it.error}</div>
+                      </div>
+                    )}
                     {it.status === "error" && (
                       <button className="retry-btn" onClick={() => setItemStatus(it.id, "pending")}>
                         Retry
@@ -661,6 +968,111 @@ export default function App() {
               onError={() => setPreview((p) => (p ? { ...p, loading: false, failed: true } : p))}
             />
             {preview.failed && <div className="pdf-preview-spinner">Preview unavailable</div>}
+          </div>
+        </div>
+      )}
+
+      {settingsOpen && (
+        <div className="modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setSettingsOpen(false); }}>
+          <div className="modal-card">
+            <div className="modal-head">
+              <h2>Settings</h2>
+              <button className="x" onClick={() => setSettingsOpen(false)} title="Close">×</button>
+            </div>
+
+            <div className="settings-section">
+              <h3>Gemini API key</h3>
+              <p className="muted settings-hint">
+                Used by the <strong>Gemini</strong> engine. Stored locally in{" "}
+                <code>~/.pdfxl_config.json</code> — it never leaves this machine
+                except to call Google's API. Get a key from{" "}
+                <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">
+                  Google AI Studio
+                </a>.
+              </p>
+
+              {geminiKeyInfo?.key_set ? (
+                <div className="settings-key-current">
+                  <span className="settings-key-masked">{geminiKeyInfo.masked}</span>
+                  {geminiKeyInfo.source === "env" ? (
+                    <span className="muted">from environment variable (remove it from your shell to change)</span>
+                  ) : (
+                    <button className="retry-btn" onClick={removeGeminiKey}>Remove</button>
+                  )}
+                </div>
+              ) : (
+                <div className="muted settings-key-current">No key configured.</div>
+              )}
+
+              {geminiKeyInfo?.source !== "env" && (
+                <div className="gemini-key-row">
+                  <input
+                    className="gemini-key-input settings-key-input"
+                    type="password"
+                    placeholder={geminiKeyInfo?.key_set ? "Paste a new key to replace it" : "Paste Gemini API key"}
+                    value={geminiKeyInput}
+                    onChange={(e) => setGeminiKeyInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") saveGeminiKey(); }}
+                    disabled={geminiSavingKey}
+                  />
+                  <button
+                    className="key-save-btn"
+                    onClick={saveGeminiKey}
+                    disabled={geminiSavingKey || !geminiKeyInput.trim()}
+                  >
+                    {geminiSavingKey ? "Validating…" : "Save"}
+                  </button>
+                </div>
+              )}
+              {geminiKeyError && <div className="ollama-err">✕ {geminiKeyError}</div>}
+            </div>
+
+            <div className="settings-section">
+              <h3>Claude API key</h3>
+              <p className="muted settings-hint">
+                Used by the <strong>Claude</strong> engine. Stored locally in{" "}
+                <code>~/.pdfxl_config.json</code> — it never leaves this machine
+                except to call Anthropic's API. Get a key from{" "}
+                <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer">
+                  the Anthropic Console
+                </a>.
+              </p>
+
+              {claudeKeyInfo?.key_set ? (
+                <div className="settings-key-current">
+                  <span className="settings-key-masked">{claudeKeyInfo.masked}</span>
+                  {claudeKeyInfo.source === "env" ? (
+                    <span className="muted">from environment variable (remove it from your shell to change)</span>
+                  ) : (
+                    <button className="retry-btn" onClick={removeClaudeKey}>Remove</button>
+                  )}
+                </div>
+              ) : (
+                <div className="muted settings-key-current">No key configured.</div>
+              )}
+
+              {claudeKeyInfo?.source !== "env" && (
+                <div className="gemini-key-row">
+                  <input
+                    className="gemini-key-input settings-key-input"
+                    type="password"
+                    placeholder={claudeKeyInfo?.key_set ? "Paste a new key to replace it" : "Paste Claude API key"}
+                    value={claudeKeyInput}
+                    onChange={(e) => setClaudeKeyInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") saveClaudeKey(); }}
+                    disabled={claudeSavingKey}
+                  />
+                  <button
+                    className="key-save-btn"
+                    onClick={saveClaudeKey}
+                    disabled={claudeSavingKey || !claudeKeyInput.trim()}
+                  >
+                    {claudeSavingKey ? "Validating…" : "Save"}
+                  </button>
+                </div>
+              )}
+              {claudeKeyError && <div className="ollama-err">✕ {claudeKeyError}</div>}
+            </div>
           </div>
         </div>
       )}
