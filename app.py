@@ -256,6 +256,42 @@ def _claude_key_info() -> dict:
     return {"key_set": True, "masked": masked, "source": "env" if env_key else "saved"}
 
 
+# ── Per-provider on/off switch (Settings UI) ─────────────────────────────────
+# Independent of key validity: lets a user hide Gemini/Claude from the engine
+# bar even when a valid key is configured. Defaults to on.
+def _load_provider_enabled(config_key: str) -> bool:
+    try:
+        with open(_CONFIG_PATH, encoding="utf-8") as f:
+            cfg = json.load(f)
+        val = cfg.get(config_key)
+        return True if val is None else bool(val)
+    except (OSError, ValueError):
+        return True
+
+
+def _save_provider_enabled(config_key: str, enabled: bool) -> None:
+    with _CONFIG_LOCK:
+        cfg = {}
+        try:
+            with open(_CONFIG_PATH, encoding="utf-8") as f:
+                cfg = json.load(f)
+            if not isinstance(cfg, dict):
+                cfg = {}
+        except (OSError, ValueError):
+            pass
+        cfg[config_key] = bool(enabled)
+        with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+
+
+def _gemini_enabled() -> bool:
+    return _load_provider_enabled("gemini_enabled")
+
+
+def _claude_enabled() -> bool:
+    return _load_provider_enabled("claude_enabled")
+
+
 # ── Extraction process pool ─────────────────────────────────────────────────
 # pdfminer parsing is pure Python, so concurrent requests only truly overlap
 # in worker processes (threads just contend on the GIL). Created lazily on the
@@ -489,7 +525,20 @@ def api_gemini_status():
     key = _gemini_key()
     status = gemini_status(key)
     status["key_set"] = bool(key)
+    status["enabled"] = _gemini_enabled()
     return jsonify(status)
+
+
+@app.route("/api/gemini/enabled", methods=["POST"])
+def api_gemini_enabled():
+    """Toggle whether the Gemini engine is offered in the UI (Settings)."""
+    data = request.get_json(silent=True) or {}
+    enabled = bool(data.get("enabled", True))
+    try:
+        _save_provider_enabled("gemini_enabled", enabled)
+    except OSError as e:
+        return jsonify({"ok": False, "error": f"Could not update config: {e}"}), 500
+    return jsonify({"ok": True, "enabled": enabled})
 
 
 @app.route("/api/gemini/key", methods=["GET", "POST", "DELETE"])
@@ -532,7 +581,20 @@ def api_claude_status():
     key = _claude_key()
     status = claude_status(key)
     status["key_set"] = bool(key)
+    status["enabled"] = _claude_enabled()
     return jsonify(status)
+
+
+@app.route("/api/claude/enabled", methods=["POST"])
+def api_claude_enabled():
+    """Toggle whether the Claude engine is offered in the UI (Settings)."""
+    data = request.get_json(silent=True) or {}
+    enabled = bool(data.get("enabled", True))
+    try:
+        _save_provider_enabled("claude_enabled", enabled)
+    except OSError as e:
+        return jsonify({"ok": False, "error": f"Could not update config: {e}"}), 500
+    return jsonify({"ok": True, "enabled": enabled})
 
 
 @app.route("/api/claude/key", methods=["GET", "POST", "DELETE"])

@@ -146,6 +146,8 @@ export default function App() {
   const [geminiModel, setGeminiModel] = useState("");
   const [geminiStatus, setGeminiStatus] = useState(null); // null | "checking" | "ok" | "no-key" | "error"
   const [geminiError, setGeminiError] = useState("");
+  const [geminiEnabled, setGeminiEnabled] = useState(true);
+  const [geminiEnabledSaving, setGeminiEnabledSaving] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [geminiKeyInfo, setGeminiKeyInfo] = useState(null); // {key_set, masked, source}
   const [geminiKeyInput, setGeminiKeyInput] = useState("");
@@ -155,6 +157,8 @@ export default function App() {
   const [claudeModel, setClaudeModel] = useState("");
   const [claudeStatus, setClaudeStatus] = useState(null); // null | "checking" | "ok" | "no-key" | "error"
   const [claudeError, setClaudeError] = useState("");
+  const [claudeEnabled, setClaudeEnabled] = useState(true);
+  const [claudeEnabledSaving, setClaudeEnabledSaving] = useState(false);
   const [claudeKeyInfo, setClaudeKeyInfo] = useState(null); // {key_set, masked, source}
   const [claudeKeyInput, setClaudeKeyInput] = useState("");
   const [claudeSavingKey, setClaudeSavingKey] = useState(false);
@@ -214,6 +218,10 @@ export default function App() {
   // to it if available.
   useEffect(() => { checkOllama({ setDefault: true, attempts: 5 }); }, []);
 
+  // On mount: probe Gemini/Claude too, so their engine buttons only appear
+  // once we know a valid key is configured (mirrors the Ollama probe above).
+  useEffect(() => { checkGemini(); checkClaude(); }, []);
+
   // fetch + JSON parse with useful failures: a network error keeps the classic
   // "could not reach" message, while a non-JSON body (e.g. the HTML 404/405 an
   // outdated backend returns for routes it doesn't know) says to restart the
@@ -236,6 +244,7 @@ export default function App() {
   };
 
   const applyGeminiStatus = (data) => {
+    if (data.enabled !== undefined) setGeminiEnabled(!!data.enabled);
     if (data.ok) {
       setGeminiModels(data.models || []);
       setGeminiModel((m) => m || pickDefaultModel(data.models));
@@ -259,6 +268,7 @@ export default function App() {
   };
 
   const applyClaudeStatus = (data) => {
+    if (data.enabled !== undefined) setClaudeEnabled(!!data.enabled);
     if (data.ok) {
       setClaudeModels(data.models || []);
       setClaudeModel((m) => m || pickDefaultModel(data.models));
@@ -349,6 +359,23 @@ export default function App() {
     }
   };
 
+  const setGeminiEnabledRemote = async (enabled) => {
+    setGeminiEnabledSaving(true);
+    try {
+      const { data } = await fetchJson("/api/gemini/enabled", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      if (data.ok) setGeminiEnabled(data.enabled);
+      else setGeminiKeyError(data.error || "Could not update setting");
+    } catch (err) {
+      setGeminiKeyError(err.message);
+    } finally {
+      setGeminiEnabledSaving(false);
+    }
+  };
+
   const saveClaudeKey = async () => {
     const key = claudeKeyInput.trim();
     if (!key) return;
@@ -395,6 +422,23 @@ export default function App() {
     }
   };
 
+  const setClaudeEnabledRemote = async (enabled) => {
+    setClaudeEnabledSaving(true);
+    try {
+      const { data } = await fetchJson("/api/claude/enabled", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      if (data.ok) setClaudeEnabled(data.enabled);
+      else setClaudeKeyError(data.error || "Could not update setting");
+    } catch (err) {
+      setClaudeKeyError(err.message);
+    } finally {
+      setClaudeEnabledSaving(false);
+    }
+  };
+
   // SSE log stream
   useEffect(() => {
     const es = new EventSource("/api/logs");
@@ -409,19 +453,32 @@ export default function App() {
     if (logsOpen) logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs, logsOpen]);
 
-  // Re-probe whenever the user switches to Ollama and it isn't confirmed up —
-  // including after an earlier failed check (they may have started it since).
+  // Re-probe whenever the user switches to an engine and it isn't confirmed
+  // up — including after an earlier failed check (they may have started
+  // Ollama, or added a key, since). Also fall back to Regex whenever the
+  // active engine's status resolves to unavailable (Ollama stopped, a
+  // Gemini/Claude key was removed, or the engine was turned off in
+  // Settings) so we never leave the UI on a hidden engine button.
   useEffect(() => {
-    if (engine === "ollama" && ollamaStatus !== "ok" && ollamaStatus !== "checking") {
-      checkOllama({ attempts: 2 });
+    if (engine === "ollama") {
+      if (ollamaStatus === "error") setEngine("regex");
+      else if (ollamaStatus !== "ok" && ollamaStatus !== "checking") checkOllama({ attempts: 2 });
     }
-    if (engine === "gemini" && geminiStatus !== "ok" && geminiStatus !== "checking") {
-      checkGemini();
+    if (engine === "gemini") {
+      if (geminiStatus === "error" || geminiStatus === "no-key" || (geminiStatus === "ok" && !geminiEnabled)) {
+        setEngine("regex");
+      } else if (geminiStatus !== "ok" && geminiStatus !== "checking") {
+        checkGemini();
+      }
     }
-    if (engine === "claude" && claudeStatus !== "ok" && claudeStatus !== "checking") {
-      checkClaude();
+    if (engine === "claude") {
+      if (claudeStatus === "error" || claudeStatus === "no-key" || (claudeStatus === "ok" && !claudeEnabled)) {
+        setEngine("regex");
+      } else if (claudeStatus !== "ok" && claudeStatus !== "checking") {
+        checkClaude();
+      }
     }
-  }, [engine]);
+  }, [engine, ollamaStatus, geminiStatus, claudeStatus, geminiEnabled, claudeEnabled]);
 
   useEffect(() => {
     if (folderInput.current) {
@@ -687,18 +744,24 @@ export default function App() {
                 className={"engine-btn" + (engine === "regex" ? " active" : "")}
                 onClick={() => setEngine("regex")}
               >Regex</button>
-              <button
-                className={"engine-btn" + (engine === "ollama" ? " active" : "")}
-                onClick={() => setEngine("ollama")}
-              >Ollama</button>
-              <button
-                className={"engine-btn" + (engine === "gemini" ? " active" : "")}
-                onClick={() => setEngine("gemini")}
-              >Gemini</button>
-              <button
-                className={"engine-btn" + (engine === "claude" ? " active" : "")}
-                onClick={() => setEngine("claude")}
-              >Claude</button>
+              {ollamaStatus === "ok" && (
+                <button
+                  className={"engine-btn" + (engine === "ollama" ? " active" : "")}
+                  onClick={() => setEngine("ollama")}
+                >Ollama</button>
+              )}
+              {geminiStatus === "ok" && geminiEnabled && (
+                <button
+                  className={"engine-btn" + (engine === "gemini" ? " active" : "")}
+                  onClick={() => setEngine("gemini")}
+                >Gemini</button>
+              )}
+              {claudeStatus === "ok" && claudeEnabled && (
+                <button
+                  className={"engine-btn" + (engine === "claude" ? " active" : "")}
+                  onClick={() => setEngine("claude")}
+                >Claude</button>
+              )}
             </div>
             {engine === "ollama" && (
               <div className="ollama-config">
@@ -981,7 +1044,24 @@ export default function App() {
             </div>
 
             <div className="settings-section">
-              <h3>Gemini API key</h3>
+              <div className="settings-section-head">
+                <h3>Gemini API key</h3>
+                {geminiKeyInfo?.key_set && (
+                  <label
+                    className="provider-toggle"
+                    title={geminiEnabled ? "Hide the Gemini engine" : "Show the Gemini engine"}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={geminiEnabled}
+                      disabled={geminiEnabledSaving}
+                      onChange={(e) => setGeminiEnabledRemote(e.target.checked)}
+                    />
+                    <span className="provider-toggle-track"><span className="provider-toggle-thumb" /></span>
+                    <span className="provider-toggle-label">{geminiEnabled ? "On" : "Off"}</span>
+                  </label>
+                )}
+              </div>
               <p className="muted settings-hint">
                 Used by the <strong>Gemini</strong> engine. Stored locally in{" "}
                 <code>~/.pdfxl_config.json</code> — it never leaves this machine
@@ -1028,7 +1108,24 @@ export default function App() {
             </div>
 
             <div className="settings-section">
-              <h3>Claude API key</h3>
+              <div className="settings-section-head">
+                <h3>Claude API key</h3>
+                {claudeKeyInfo?.key_set && (
+                  <label
+                    className="provider-toggle"
+                    title={claudeEnabled ? "Hide the Claude engine" : "Show the Claude engine"}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={claudeEnabled}
+                      disabled={claudeEnabledSaving}
+                      onChange={(e) => setClaudeEnabledRemote(e.target.checked)}
+                    />
+                    <span className="provider-toggle-track"><span className="provider-toggle-thumb" /></span>
+                    <span className="provider-toggle-label">{claudeEnabled ? "On" : "Off"}</span>
+                  </label>
+                )}
+              </div>
               <p className="muted settings-hint">
                 Used by the <strong>Claude</strong> engine. Stored locally in{" "}
                 <code>~/.pdfxl_config.json</code> — it never leaves this machine

@@ -601,6 +601,51 @@ td .cell:focus { background: var(--cell-focus); }
 .modal-head h2 { margin: 0; font-size: 16px; }
 .settings-section { padding-top: 6px; }
 .settings-section h3 { margin: 0 0 6px; font-size: 13px; }
+.settings-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.settings-section-head h3 { margin: 0; }
+.provider-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.provider-toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
+.provider-toggle-track {
+  width: 32px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--line);
+  border: 1px solid var(--line);
+  position: relative;
+  transition: background 0.15s ease;
+  flex: none;
+}
+.provider-toggle-thumb {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--panel);
+  transition: transform 0.15s ease;
+}
+.provider-toggle input:checked + .provider-toggle-track {
+  background: var(--brand);
+  border-color: var(--brand);
+}
+.provider-toggle input:checked + .provider-toggle-track .provider-toggle-thumb {
+  transform: translateX(14px);
+  background: #fff;
+}
+.provider-toggle input:disabled + .provider-toggle-track { opacity: 0.6; }
+.provider-toggle-label { font-size: 12px; color: var(--muted); min-width: 20px; }
 .settings-hint { font-size: 12px; margin: 0 0 10px; line-height: 1.5; }
 .settings-hint code { font-size: 11px; }
 .settings-hint a { color: var(--brand); }
