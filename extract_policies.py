@@ -548,13 +548,16 @@ def _gemini_usable(name: str) -> bool:
 
 
 def _recommended_gemini(names: list[str]) -> str:
-    """Pick the model to tag as "Recommended": the newest stable flash.
+    """Pick the model to tag as "Recommended": gemini-2.5-flash.
 
     Every Gemini model is multimodal, so flash is the sweet spot for field
     extraction — it reads both text and page images accurately at a fraction
-    of pro's cost/latency. Prefer an exact stable "gemini-<ver>-flash" (newest
-    version); otherwise any flash that isn't a lite/preview/experimental spin.
+    of pro's cost/latency. gemini-2.5-flash is the pinned default; if it's
+    not in the account's model list, fall back to the newest stable
+    "gemini-<ver>-flash", then any non-lite/preview/experimental flash.
     """
+    if "gemini-2.5-flash" in names:
+        return "gemini-2.5-flash"
     best, best_ver = "", -1.0
     for n in names:
         m = re.fullmatch(r"gemini-(\d+(?:\.\d+)?)-flash", n)

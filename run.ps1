@@ -1,4 +1,4 @@
-# One-command launcher for Windows (PowerShell 5.1+).
+﻿# One-command launcher for Windows (PowerShell 5.1+).
 # Installs Ollama + Python deps if needed, builds the React UI if missing, starts the app.
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -94,6 +94,21 @@ if (-not (Test-Path "frontend\dist\index.html")) {
     npm run build
     Pop-Location
 }
+
+# ── Open default browser once the server answers ────────────────────────────
+$URL = "http://127.0.0.1:5001"
+Start-Job -ScriptBlock {
+    param($url)
+    for ($i = 0; $i -lt 60; $i++) {
+        try {
+            Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 | Out-Null
+            Start-Process $url
+            break
+        } catch {
+            Start-Sleep -Seconds 1
+        }
+    }
+} -ArgumentList $URL | Out-Null
 
 Write-Host "→ Starting server at http://127.0.0.1:5001"
 python app.py

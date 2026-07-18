@@ -506,7 +506,7 @@ def _do_extract(path: str, text: str, engine: str, model: str) -> dict:
         return row
     if engine == "gemini":
         if not model:
-            raise ValueError("No Gemini model specified")
+            model = "gemini-2.5-flash"
         key = _gemini_key()
         name = os.path.basename(path)
         # Gemini models are all multimodal, so route on the text layer alone:
@@ -523,7 +523,7 @@ def _do_extract(path: str, text: str, engine: str, model: str) -> dict:
         return extract_fields_gemini_vision(path, model, key)
     if engine == "claude":
         if not model:
-            raise ValueError("No Claude model specified")
+            model = "claude-3-5-sonnet-20241022"
         key = _claude_key()
         name = os.path.basename(path)
         # Every Claude model is multimodal, so route on the text layer alone,

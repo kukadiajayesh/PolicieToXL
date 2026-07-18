@@ -157,7 +157,7 @@ export default function App() {
   const [claudeModel, setClaudeModel] = useState("");
   const [claudeStatus, setClaudeStatus] = useState(null); // null | "checking" | "ok" | "no-key" | "error"
   const [claudeError, setClaudeError] = useState("");
-  const [claudeEnabled, setClaudeEnabled] = useState(true);
+  const [claudeEnabled, setClaudeEnabled] = useState(false);
   const [claudeEnabledSaving, setClaudeEnabledSaving] = useState(false);
   const [claudeKeyInfo, setClaudeKeyInfo] = useState(null); // {key_set, masked, source}
   const [claudeKeyInput, setClaudeKeyInput] = useState("");
@@ -1115,7 +1115,7 @@ export default function App() {
                   <input
                     type="checkbox"
                     checked={claudeEnabled}
-                    disabled={claudeEnabledSaving || !claudeKeyInfo?.key_set}
+                    disabled={claudeEnabledSaving}
                     onChange={(e) => setClaudeEnabledRemote(e.target.checked)}
                   />
                   <span className="provider-toggle-track"><span className="provider-toggle-thumb" /></span>

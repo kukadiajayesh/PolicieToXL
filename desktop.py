@@ -34,7 +34,8 @@ def _free_port() -> int:
 def _run_server(port: int) -> None:
     # threaded=True so concurrent /api/extract calls don't block the UI.
     # use_reloader=False is required when running off the main thread.
-    app.run(host="127.0.0.1", port=port, threaded=True, use_reloader=False)
+    # Changed host to 0.0.0.0 to allow external connections via ngrok
+    app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
 
 
 def _wait_until_ready(url: str, timeout: float = 15.0) -> None:
@@ -50,7 +51,7 @@ def _wait_until_ready(url: str, timeout: float = 15.0) -> None:
 
 
 def main() -> None:
-    port = _free_port()
+    port = 5001  # Fixed port for ngrok tunneling
     url = f"http://127.0.0.1:{port}"
 
     server = threading.Thread(target=_run_server, args=(port,), daemon=True)
