@@ -48,15 +48,10 @@ cd frontend && npm install && npm run build && cd ..
 python3 app.py
 ```
 
-Then open **http://127.0.0.1:5001**.
+Then open **http://127.0.0.1:5001** (opens automatically in your default
+browser when started via `run.sh` / `run.ps1` / `python3 app.py`).
 
-**As a native desktop window** (no browser tab, uses pywebview):
-
-```bash
-python3 desktop.py
-```
-
-See `PACKAGING.md` for building a standalone `.app` / `.exe` / Linux binary.
+See `PACKAGING.md` for building a standalone installer/binary (Windows/macOS/Linux).
 
 ## Using the UI
 

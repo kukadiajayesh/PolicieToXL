@@ -22,8 +22,11 @@ import shutil
 import logging
 import tempfile
 import threading
+import time
 import subprocess
 import collections
+import webbrowser
+import urllib.request
 import concurrent.futures
 from functools import lru_cache
 
@@ -884,10 +887,25 @@ def pick_output():
         return jsonify({"error": str(e)}), 500
 
 
+def _open_browser_when_ready(url: str, timeout: float = 15.0) -> None:
+    """Wait for the server to answer, then open it in the OS default browser."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            urllib.request.urlopen(url, timeout=1)
+            webbrowser.open(url)
+            return
+        except Exception:
+            time.sleep(0.15)
+
+
 if __name__ == "__main__":
-    print("Insurance PDF extractor running at http://127.0.0.1:5001")
+    url = "http://127.0.0.1:5001"
+    print(f"Insurance PDF extractor running at {url}")
+    print("Opening in your default browser... (Ctrl+C here to stop the server)")
+    threading.Thread(target=_open_browser_when_ready, args=(url,), daemon=True).start()
     try:
-        app.run(host="127.0.0.1", port=5001, debug=False)
+        app.run(host="127.0.0.1", port=5001, threaded=True, debug=False, use_reloader=False)
     except OSError as e:
         print(f"Could not start on 127.0.0.1:5001 ({e}). Is the app already running?")
         sys.exit(1)

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Insurance Policy Extractor
+Exec=InsurancePolicyExtractor
+Icon=InsurancePolicyExtractor
+Categories=Office;
+Terminal=true

@@ -1,13 +1,15 @@
-# Packaging — standalone desktop app
+# Packaging — standalone binary
 
-The app ships as a native desktop window using **PyWebView** (OS-native webview,
-no Chromium) with the Python backend frozen by **PyInstaller**. The React UI is
-built once to static files and bundled inside the executable.
+The app is a local Flask server that opens itself in the OS's **default
+browser** — there's no native window, no bundled Chromium, and no GUI
+toolkit dependency (WebView2 / WKWebView / WebKitGTK). The Python backend is
+frozen by **PyInstaller**; the React UI is built once to static files and
+bundled inside the executable.
 
 ```
-desktop.py  ──spawns──▶  Flask (app.py) on a free localhost port
-     │                        └─ extract_policies.py (pdfplumber + pandas + openpyxl)
-     └──opens──▶  native window (WebView2 / WKWebView / WebKitGTK) → the Flask URL
+app.py  ──serves──▶  frontend/dist (React UI) + /api/* (Flask)
+   │                      └─ extract_policies.py (pdfplumber + pandas + openpyxl)
+   └──opens──▶  the OS default browser, pointed at http://127.0.0.1:5001
 ```
 
 ## Run from source
@@ -15,70 +17,91 @@ desktop.py  ──spawns──▶  Flask (app.py) on a free localhost port
 ```bash
 pip install -r requirements.txt
 cd frontend && npm install && npm run build && cd ..
-python desktop.py
+python app.py
 ```
+
+This starts the server, prints its URL, and opens it in your default browser
+automatically. Ctrl+C in the terminal stops the server.
 
 ## Build a standalone binary
 
 > PyInstaller **cannot cross-compile** — build each target on that OS (or use the
-> included GitHub Actions workflow, which does all three).
+> included GitHub Actions workflow, which builds all of them).
 
 ```bash
 pip install -r requirements-build.txt
 cd frontend && npm install && npm run build && cd ..   # must run before freezing
-pyinstaller desktop.spec
+pyinstaller app.spec
 ```
 
-Output in `dist/`:
+This produces the raw one-folder build in `dist/`. For a real installable
+artifact, run the platform packaging step on top of that (also done
+automatically in CI):
 
-| OS | Artifact | How to run |
-|----|----------|-----------|
-| Windows | `dist/InsurancePolicyExtractor/InsurancePolicyExtractor.exe` | double-click |
-| macOS | `dist/InsurancePolicyExtractor.app` | double-click |
-| Linux | `dist/InsurancePolicyExtractor/InsurancePolicyExtractor` | `./InsurancePolicyExtractor` |
+| OS | Installable artifact | Packaging step |
+|----|----------------------|-----------------|
+| Windows | `InsurancePolicyExtractorSetup.exe` | `iscc packaging\windows\installer.iss` (Inno Setup) |
+| macOS | `InsurancePolicyExtractor-<arch>.dmg` | `packaging/macos/make_dmg.sh <out.dmg>` |
+| Linux | `InsurancePolicyExtractor-x86_64.AppImage` | `packaging/linux/make_appimage.sh <out.AppImage>` |
 
-## Platform prerequisites (runtime webview)
+Raw portable builds (`dist/InsurancePolicyExtractor/…`, zipped/tarred) are
+also produced in CI for users who prefer an unpacked folder.
 
-- **Windows** — WebView2 Runtime. Present on Windows 11 and most updated Win10;
-  if missing, install the Evergreen runtime from Microsoft.
-- **macOS** — WKWebView is built in. Nothing to install.
-- **Linux** — WebKitGTK:
-  `sudo apt-get install libgtk-3-0 libwebkit2gtk-4.1-0 gir1.2-webkit2-4.1`
-  and `pip install pygobject` in the build env.
+## Supported OS versions
+
+Because there's no native-webview dependency, support is simply "wherever a
+frozen Python + a browser can run":
+
+| OS | Versions |
+|----|----------|
+| Windows | 7 SP1, 8, 8.1, 10, 11 |
+| macOS | 12 (Monterey) and later, Intel + Apple Silicon (two separate `.dmg`s, built on `macos-13` and `macos-latest` runners) |
+| Linux | Any modern glibc distro (AppImage) |
+
+The only runtime requirement on the target machine is *some* installed
+browser (all of the above ship one by default) — nothing else to install.
 
 ## App icons
 
-Icons live in `assets/` (`icon.ico` for Windows, `icon.icns` for macOS,
-`icon.png` master). They're wired into `desktop.spec` automatically per platform.
-To change the icon, replace those files (keep the names) and rebuild.
+Icons live in `assets/` (`icon.ico` for Windows, `icon.png` used for the
+Linux AppImage). They're wired into `app.spec` / `packaging/windows/installer.iss`
+/ `packaging/linux/make_appimage.sh`. To change the icon, replace those files
+(keep the names) and rebuild.
 
-## CI builds for all three OS
+## CI builds for all platforms
 
-Push a tag and GitHub Actions builds Windows/macOS/Linux artifacts **and
-publishes them to a GitHub Release** (auto-generated release notes):
+Push a tag and GitHub Actions builds the Windows installer, both macOS dmgs,
+and the Linux AppImage (plus portable zip/tar.gz fallbacks) and **publishes
+them all to a GitHub Release** (auto-generated release notes):
 
 ```bash
 git tag v1.0.0
 git push --tags
 ```
 
+The version in the tag (`v1.0.0` → `1.0.0`) is threaded into the Windows
+installer's `AppVersion` via the `APP_VERSION` env var.
+
 The binaries attach to the Release for that tag. You can also trigger the build
 manually from the Actions tab (workflow_dispatch) — that run uploads artifacts
 but does not create a Release (releases happen only on tag pushes).
 
-## Known gotchas (already handled in `desktop.spec`)
+## Known gotchas (already handled in `app.spec`)
 
 - **pdfplumber / pdfminer.six data files** — bundled via `collect_all`; without
   them the frozen app reads zero text from PDFs.
 - **Bundled React UI** — `app.py` resolves `frontend/dist` from `sys._MEIPASS`
-  when frozen, and `desktop.spec` copies `frontend/dist` into the bundle.
+  when frozen, and `app.spec` copies `frontend/dist` into the bundle.
 - **openpyxl writer engine** — added as a hidden import so `df.to_excel` works.
+- **`console=True`** in `app.spec` — there's no window UI, so the console is
+  the only way to see server logs and stop the app (Ctrl+C). The Linux
+  `.desktop` entry sets `Terminal=true` for the same reason.
 
 ## Code signing & distribution
 
 Unsigned builds run fine locally but trigger warnings when shared:
 
-- **macOS** — Gatekeeper blocks unsigned `.app`s. Right-click → Open to bypass
+- **macOS** — Gatekeeper blocks unsigned apps. Right-click → Open to bypass
   for personal use, or sign + notarize with an Apple Developer ID for
   distribution.
 - **Windows** — SmartScreen warns on unsigned `.exe`s. An Authenticode
@@ -94,7 +117,7 @@ This is normal for a frozen scientific-Python app.
 
 ## iOS / mobile
 
-Not supported by this approach — PyWebView, PyInstaller, Electron and Tauri are
-all desktop-only, and an embedded Flask server can't ship on the iOS App Store.
+Not supported by this approach — PyInstaller freezes a desktop Python
+process, and an embedded Flask server can't ship on the iOS App Store.
 Mobile would require a separate rewrite (e.g. a hosted API + native/Flutter
 client, or an on-device port of the extraction logic).
