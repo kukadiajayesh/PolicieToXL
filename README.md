@@ -1,24 +1,24 @@
 # Insurance Policy Extractor — UI
 
-A fully offline desktop-style tool to extract structured data from insurance
-policy PDFs into Excel. **React frontend, Python backend, nothing leaves your
-machine.**
+A desktop-style tool to extract structured data from insurance policy PDFs
+into Excel. **React frontend, Python backend**, using Google's Gemini API to
+read each PDF and pull out the fields.
 
 ## Architecture
 
 ```
 React (Vite)  ──fetch──▶  Flask (app.py)  ──▶  extract_policies.py  ──▶  Excel
-   frontend/                 local API           pdfplumber + regex       openpyxl
+   frontend/                 local API          pdfplumber + Gemini API   openpyxl
 ```
 
-The React app is built to static files and served by Flask, so at runtime there
-is **no internet dependency** — PDFs are read locally and the Excel file is
-written to a local path you choose.
+The React app is built to static files and served by Flask. PDFs and the
+generated Excel file stay on your machine, but the document contents are sent
+to Google's Gemini API for field extraction — see the **Gemini** section below.
 
 ## Run it
 
-**macOS / Linux — one command** (installs/starts Ollama, creates `.venv`,
-installs Python deps, builds the React UI on first run, starts the server):
+**macOS / Linux — one command** (creates `.venv`, installs Python deps, builds
+the React UI on first run, starts the server):
 
 ```bash
 ./run.sh
@@ -71,84 +71,18 @@ python3 app.py            # backend on :5001
 cd frontend && npm run dev   # UI on :5173, proxies /api to :5001
 ```
 
-## Ollama (AI extraction)
-
-The app supports a local LLM via [Ollama](https://ollama.com) as an alternative
-to the regex engine. Useful for PDFs from insurers not yet covered by the regex
-patterns.
-
-### 1. Install Ollama
-
-```bash
-# macOS / Linux
-curl -fsSL https://ollama.com/install.sh | sh
-
-# macOS (Homebrew)
-brew install ollama
-```
-
-### 2. Pull a model
-
-Text extraction (fast, low memory):
-
-```bash
-ollama pull llama3.2        # ~2 GB, good all-rounder
-ollama pull qwen2.5:7b      # slightly more accurate on structured data
-```
-
-Vision extraction (for scanned / image-only PDFs):
-
-```bash
-ollama pull llava:7b        # ~4 GB, multimodal
-ollama pull minicpm-v       # lighter alternative
-```
-
-### 3. Start Ollama
-
-```bash
-ollama serve
-```
-
-Ollama listens on `http://localhost:11434` by default. The app checks this
-endpoint automatically and shows a status indicator in the UI.
-
-### 4. Select Ollama in the UI
-
-In the extraction panel, switch the **Engine** toggle from *Regex* to *Ollama*
-and pick your model from the dropdown. Then extract as usual.
-
-**Image-based extraction** — pick a vision-capable model (`llava`,
-`minicpm-v`, `moondream`, etc.; shown as *Image Based* in the dropdown) and the
-app renders each page to an image and reads the fields straight from the
-picture. The first 2 pages are sent by default (small vision models have tight
-context windows; raise `OLLAMA_VISION_MAX_PAGES` for roomier ones). The image
-path is also used automatically when a PDF has fewer than 200 characters of
-extractable text (a scanned / image-only PDF).
-
-### Troubleshooting
-
-| Symptom | Fix |
-|---------|-----|
-| "Ollama not running" badge | `ollama serve` is not running — start it |
-| Empty model list | Pull at least one model: `ollama pull llama3.2` |
-| Timeout on large PDFs | Only the first 8 000 chars are sent; try a faster model |
-| Vision returns empty / errors | Pick an *Image Based* model; lower `OLLAMA_VISION_MAX_PAGES` if the model rejects the request for exceeding its context size |
-
----
-
 ## Gemini (cloud AI extraction)
 
-The app can also use Google's Gemini API as a third engine. It is usually more
-accurate than small local models, but **unlike Regex and Ollama the document
-contents are sent to Google's servers** — don't use it for PDFs that must stay
-on the machine.
+The app uses Google's Gemini API to read each PDF and extract fields —
+**document contents are sent to Google's servers**, so don't use this for PDFs
+that must stay on the machine.
 
 1. Get an API key from [Google AI Studio](https://aistudio.google.com/apikey)
    (there is a free tier).
-2. Switch the **Engine** toggle to *Gemini* and paste the key when prompted —
-   it is validated and saved to `~/.pdfxl_config.json` so you only do this
-   once. Alternatively set the `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
-   environment variable before starting the app.
+2. Open **Settings** and paste the key when prompted — it is validated and
+   saved to `~/.pdfxl_config.json` so you only do this once. Alternatively set
+   the `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) environment variable before
+   starting the app.
 3. Pick a model from the dropdown (the *flash* models are fast, cheap and
    plenty for field extraction) and extract as usual.
 
@@ -161,10 +95,10 @@ images.
 
 ## Note on extraction accuracy
 
-The regex patterns in `extract_policies.py` are tuned for the **HDFC ERGO**
-layout. Other insurers (ICICI Lombard, etc.) will leave some fields blank — that
-is expected. The editable results table is there precisely so you can correct
-those fields by hand, and you can extend the regexes per insurer over time.
+Extraction accuracy depends on how cleanly the PDF's text layer maps to the
+fields Gemini is asked for. Some insurer layouts will leave a field blank or
+misread it — that is expected. The editable results table is there precisely
+so you can correct those fields by hand before exporting.
 
 ## Fields extracted
 

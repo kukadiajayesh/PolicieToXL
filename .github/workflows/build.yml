@@ -42,9 +42,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Windows must freeze with Python 3.8: CPython 3.9+ does not run on
+      # Windows 7 at all (not just an installer restriction — the interpreter
+      # itself won't launch there), and installer.iss/PACKAGING.md commit this
+      # app to supporting Windows 7 SP1+. macOS/Linux have no such floor, so
+      # they stay on a current Python.
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ runner.os == 'Windows' && '3.8' || '3.11' }}
 
       - uses: actions/setup-node@v4
         with:

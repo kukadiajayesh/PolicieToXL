@@ -16,9 +16,7 @@ function ModelDropdown({ models, value, onChange }) {
       <button className="model-select-btn" onClick={() => setOpen((v) => !v)} type="button">
         {selected ? (
           <>
-            <span className="model-kind-icon" title={selected.vision ? "Image Based" : "Text Based"}>
-              {selected.vision ? "🖼" : "📝"}
-            </span>
+
             <span className="model-real-name">{selected.name}</span>
             {selected.recommended && <span className="model-rec" title="Recommended">★</span>}
           </>
@@ -35,9 +33,7 @@ function ModelDropdown({ models, value, onChange }) {
               className={"model-opt" + (m.name === value ? " selected" : "")}
               onClick={() => { onChange(m.name); setOpen(false); }}
             >
-              <span className="model-kind-icon" title={m.vision ? "Image Based" : "Text Based"}>
-                {m.vision ? "🖼" : "📝"}
-              </span>
+
               <span className="model-real-name">{m.name}</span>
               {m.recommended && <span className="model-rec" title="Recommended">★</span>}
             </li>
@@ -137,35 +133,20 @@ export default function App() {
   const [theme, setTheme] = useState(
     () => localStorage.getItem("theme") || "system"
   );
-  const [engine, setEngine] = useState("regex");
-  const [ollamaModels, setOllamaModels] = useState([]);
-  const [ollamaModel, setOllamaModel] = useState("");
-  const [ollamaStatus, setOllamaStatus] = useState(null); // null | "checking" | "ok" | "error"
-  const [ollamaError, setOllamaError] = useState("");
+  const [engine, setEngine] = useState("gemini");
   const [geminiModels, setGeminiModels] = useState([]);
   const [geminiModel, setGeminiModel] = useState("");
   const [geminiStatus, setGeminiStatus] = useState(null); // null | "checking" | "ok" | "no-key" | "error"
   const [geminiError, setGeminiError] = useState("");
-  const [geminiEnabled, setGeminiEnabled] = useState(true);
-  const [geminiEnabledSaving, setGeminiEnabledSaving] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [geminiKeyInfo, setGeminiKeyInfo] = useState(null); // {key_set, masked, source}
   const [geminiKeyInput, setGeminiKeyInput] = useState("");
   const [geminiSavingKey, setGeminiSavingKey] = useState(false);
   const [geminiKeyError, setGeminiKeyError] = useState("");
-  const [claudeModels, setClaudeModels] = useState([]);
-  const [claudeModel, setClaudeModel] = useState("");
-  const [claudeStatus, setClaudeStatus] = useState(null); // null | "checking" | "ok" | "no-key" | "error"
-  const [claudeError, setClaudeError] = useState("");
-  const [claudeEnabled, setClaudeEnabled] = useState(false);
-  const [claudeEnabledSaving, setClaudeEnabledSaving] = useState(false);
-  const [claudeKeyInfo, setClaudeKeyInfo] = useState(null); // {key_set, masked, source}
-  const [claudeKeyInput, setClaudeKeyInput] = useState("");
-  const [claudeSavingKey, setClaudeSavingKey] = useState(false);
-  const [claudeKeyError, setClaudeKeyError] = useState("");
   const [logs, setLogs] = useState([]);
   const [logsOpen, setLogsOpen] = useState(false);
   const [preview, setPreview] = useState(null); // {url, x, y, col, loading}
+  const [errorHover, setErrorHover] = useState(null); // { text, x, y }
   const fileInput = useRef(null);
   const folderInput = useRef(null);
   const logsEndRef = useRef(null);
@@ -189,38 +170,9 @@ export default function App() {
   const cycleTheme = () =>
     setTheme((t) => THEME_ORDER[(THEME_ORDER.indexOf(t) + 1) % THEME_ORDER.length]);
 
-  const checkOllama = async ({ setDefault = false, attempts = 1 } = {}) => {
-    setOllamaStatus("checking");
-    setOllamaError("");
-    // Ollama may still be starting up when the page loads, so a single failed
-    // probe shouldn't condemn it — retry a few times before showing the error.
-    for (let i = 0; i < attempts; i++) {
-      try {
-        const res = await fetch("/api/ollama/status");
-        const data = await res.json();
-        if (data.ok) {
-          setOllamaModels(data.models || []);
-          setOllamaModel((m) => m || pickDefaultModel(data.models));
-          setOllamaStatus("ok");
-          if (setDefault) setEngine("ollama");
-          return;
-        }
-        setOllamaError(data.error || "Ollama not reachable");
-      } catch {
-        setOllamaError("Could not reach Ollama");
-      }
-      if (i < attempts - 1) await new Promise((r) => setTimeout(r, 2000));
-    }
-    setOllamaStatus("error");
-  };
-
-  // On mount: probe Ollama (patiently — it may still be booting) and default
-  // to it if available.
-  useEffect(() => { checkOllama({ setDefault: true, attempts: 5 }); }, []);
-
-  // On mount: probe Gemini/Claude too, so their engine buttons only appear
-  // once we know a valid key is configured (mirrors the Ollama probe above).
-  useEffect(() => { checkGemini(); checkClaude(); }, []);
+  // On mount: probe Gemini, so its engine button only appears
+  // once we know a valid key is configured.
+  useEffect(() => { checkGemini(); }, []);
 
   // fetch + JSON parse with useful failures: a network error keeps the classic
   // "could not reach" message, while a non-JSON body (e.g. the HTML 404/405 an
@@ -244,7 +196,6 @@ export default function App() {
   };
 
   const applyGeminiStatus = (data) => {
-    if (data.enabled !== undefined) setGeminiEnabled(!!data.enabled);
     if (data.ok) {
       setGeminiModels(data.models || []);
       setGeminiModel((m) => m || pickDefaultModel(data.models));
@@ -267,49 +218,16 @@ export default function App() {
     }
   };
 
-  const applyClaudeStatus = (data) => {
-    if (data.enabled !== undefined) setClaudeEnabled(!!data.enabled);
-    if (data.ok) {
-      setClaudeModels(data.models || []);
-      setClaudeModel((m) => m || pickDefaultModel(data.models));
-      setClaudeStatus("ok");
-      return;
-    }
-    setClaudeError(data.error || "Claude not reachable");
-    setClaudeStatus(data.key_set ? "error" : "no-key");
-  };
-
-  const checkClaude = async () => {
-    setClaudeStatus("checking");
-    setClaudeError("");
-    try {
-      const { data } = await fetchJson("/api/claude/status");
-      applyClaudeStatus(data);
-    } catch (err) {
-      setClaudeError(err.message);
-      setClaudeStatus("error");
-    }
-  };
-
   const openSettings = async () => {
     setSettingsOpen(true);
     setGeminiKeyError("");
     setGeminiKeyInput("");
-    setClaudeKeyError("");
-    setClaudeKeyInput("");
     try {
       const { data } = await fetchJson("/api/gemini/key");
       setGeminiKeyInfo(data);
     } catch (err) {
       setGeminiKeyInfo(null);
       setGeminiKeyError(err.message);
-    }
-    try {
-      const { data } = await fetchJson("/api/claude/key");
-      setClaudeKeyInfo(data);
-    } catch (err) {
-      setClaudeKeyInfo(null);
-      setClaudeKeyError(err.message);
     }
   };
 
@@ -359,85 +277,6 @@ export default function App() {
     }
   };
 
-  const setGeminiEnabledRemote = async (enabled) => {
-    setGeminiEnabledSaving(true);
-    try {
-      const { data } = await fetchJson("/api/gemini/enabled", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled }),
-      });
-      if (data.ok) setGeminiEnabled(data.enabled);
-      else setGeminiKeyError(data.error || "Could not update setting");
-    } catch (err) {
-      setGeminiKeyError(err.message);
-    } finally {
-      setGeminiEnabledSaving(false);
-    }
-  };
-
-  const saveClaudeKey = async () => {
-    const key = claudeKeyInput.trim();
-    if (!key) return;
-    setClaudeSavingKey(true);
-    setClaudeKeyError("");
-    try {
-      const { data } = await fetchJson("/api/claude/key", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_key: key }),
-      });
-      if (data.ok) {
-        setClaudeKeyInput("");
-        setClaudeKeyInfo({ key_set: data.key_set, masked: data.masked, source: data.source });
-        applyClaudeStatus(data);
-        flash("Claude API key saved.", "info");
-      } else {
-        setClaudeKeyError(data.error || "Key was rejected");
-      }
-    } catch (err) {
-      setClaudeKeyError(err.message);
-    } finally {
-      setClaudeSavingKey(false);
-    }
-  };
-
-  const removeClaudeKey = async () => {
-    setClaudeKeyError("");
-    try {
-      const { data } = await fetchJson("/api/claude/key", { method: "DELETE" });
-      if (!data.ok) {
-        setClaudeKeyError(data.error || "Could not remove key");
-        return;
-      }
-      setClaudeKeyInfo({ key_set: data.key_set, masked: data.masked, source: data.source });
-      // Env-var keys survive removal of the saved one, so re-probe instead of
-      // assuming Claude is now unconfigured.
-      setClaudeModel("");
-      setClaudeModels([]);
-      checkClaude();
-      flash("Saved Claude API key removed.", "info");
-    } catch (err) {
-      setClaudeKeyError(err.message);
-    }
-  };
-
-  const setClaudeEnabledRemote = async (enabled) => {
-    setClaudeEnabledSaving(true);
-    try {
-      const { data } = await fetchJson("/api/claude/enabled", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled }),
-      });
-      if (data.ok) setClaudeEnabled(data.enabled);
-      else setClaudeKeyError(data.error || "Could not update setting");
-    } catch (err) {
-      setClaudeKeyError(err.message);
-    } finally {
-      setClaudeEnabledSaving(false);
-    }
-  };
 
   // SSE log stream
   useEffect(() => {
@@ -453,32 +292,29 @@ export default function App() {
     if (logsOpen) logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs, logsOpen]);
 
-  // Re-probe whenever the user switches to an engine and it isn't confirmed
-  // up — including after an earlier failed check (they may have started
-  // Ollama, or added a key, since). Also fall back to Regex whenever the
-  // active engine's status resolves to unavailable (Ollama stopped, a
-  // Gemini/Claude key was removed, or the engine was turned off in
-  // Settings) so we never leave the UI on a hidden engine button.
+  // Re-probe Gemini when not already checking or ok.
   useEffect(() => {
-    if (engine === "ollama") {
-      if (ollamaStatus === "error") setEngine("regex");
-      else if (ollamaStatus !== "ok" && ollamaStatus !== "checking") checkOllama({ attempts: 2 });
+    if (geminiStatus !== "ok" && geminiStatus !== "checking") {
+      checkGemini();
     }
-    if (engine === "gemini") {
-      if (geminiStatus === "error" || geminiStatus === "no-key" || (geminiStatus === "ok" && !geminiEnabled)) {
-        setEngine("regex");
-      } else if (geminiStatus !== "ok" && geminiStatus !== "checking") {
-        checkGemini();
-      }
+  }, [geminiStatus]);
+
+  // If user changes the model, retry any failed items
+  useEffect(() => {
+    if (geminiModel) {
+      setQueue((q) => {
+        let changed = false;
+        const nextQ = q.map((it) => {
+          if (it.status === "error") {
+            changed = true;
+            return { ...it, status: "pending", error: null };
+          }
+          return it;
+        });
+        return changed ? nextQ : q;
+      });
     }
-    if (engine === "claude") {
-      if (claudeStatus === "error" || claudeStatus === "no-key" || (claudeStatus === "ok" && !claudeEnabled)) {
-        setEngine("regex");
-      } else if (claudeStatus !== "ok" && claudeStatus !== "checking") {
-        checkClaude();
-      }
-    }
-  }, [engine, ollamaStatus, geminiStatus, claudeStatus, geminiEnabled, claudeEnabled]);
+  }, [geminiModel]);
 
   useEffect(() => {
     if (folderInput.current) {
@@ -518,52 +354,83 @@ export default function App() {
     if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files);
   };
 
-  const setItemStatus = (id, status, error) =>
+  const setItemStatus = (id, status, error, usedModel) =>
     setQueue((q) =>
-      q.map((it) => (it.id === id ? { ...it, status, error } : it))
+      q.map((it) => (it.id === id ? { ...it, status, error, usedModel: usedModel !== undefined ? usedModel : it.usedModel } : it))
     );
 
   const extractOne = async (item, orderIdx) => {
     setItemStatus(item.id, "reading");
-    try {
-      let res;
-      const model =
-        engine === "ollama" ? ollamaModel
-        : engine === "gemini" ? geminiModel
-        : engine === "claude" ? claudeModel
-        : "";
-      if (item.file) {
-        const fd = new FormData();
-        fd.append("file", item.file, item.name);
-        fd.append("engine", engine);
-        if (model) fd.append("model", model);
-        res = await fetch("/api/extract", { method: "POST", body: fd });
-      } else {
-        res = await fetch("/api/extract", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ path: item.path, engine, model }),
-        });
+
+    const modelsToTry = [geminiModel];
+    if (geminiModels) {
+      for (const m of geminiModels) {
+        if (m.name !== geminiModel) {
+          modelsToTry.push(m.name);
+        }
       }
-      let data;
+    }
+
+    let lastErr = null;
+    let workedModel = null;
+
+    for (let i = 0; i < modelsToTry.length; i++) {
+      const model = modelsToTry[i];
       try {
-        data = await res.json();
-      } catch {
-        throw new Error(`Server error (HTTP ${res.status})`);
+        let res;
+        if (item.file) {
+          const fd = new FormData();
+          fd.append("file", item.file, item.name);
+          if (model) fd.append("model", model);
+          res = await fetch("/api/extract", { method: "POST", body: fd });
+        } else {
+          res = await fetch("/api/extract", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: item.path, model }),
+          });
+        }
+        let data;
+        try {
+          data = await res.json();
+        } catch {
+          throw new Error(`Server error (HTTP ${res.status})`);
+        }
+        if (!res.ok) {
+          const errMsg = data.error || "Extraction failed";
+          const lower = errMsg.toLowerCase();
+          const isLimit = lower.includes("quota") || lower.includes("429") || lower.includes("exhausted") || lower.includes("rate limit") || res.status === 429;
+          if (isLimit && i < modelsToTry.length - 1) {
+            lastErr = new Error(errMsg);
+            continue;
+          }
+          throw new Error(errMsg);
+        }
+
+        const row = { ...data.row, _qidx: orderIdx, _qid: item.id };
+        setRows((r) =>
+          [...r.filter((x) => x._qid !== item.id), row].sort(
+            (a, b) => (a._qidx ?? 0) - (b._qidx ?? 0)
+          )
+        );
+        workedModel = model;
+        break; // Succeeded!
+      } catch (err) {
+        const lower = err.message.toLowerCase();
+        const isLimit = lower.includes("quota") || lower.includes("429") || lower.includes("exhausted") || lower.includes("rate limit");
+        if (isLimit && i < modelsToTry.length - 1) {
+          lastErr = err;
+          continue;
+        }
+        lastErr = err;
+        break; // Failed and not a limit
       }
-      if (!res.ok) throw new Error(data.error || "Extraction failed");
-      // Results can arrive out of order when extracting concurrently; keep the
-      // table sorted by queue position. _qid ties the row to its queue item so
-      // a retried file replaces its old row instead of duplicating it.
-      const row = { ...data.row, _qidx: orderIdx, _qid: item.id };
-      setRows((r) =>
-        [...r.filter((x) => x._qid !== item.id), row].sort(
-          (a, b) => (a._qidx ?? 0) - (b._qidx ?? 0)
-        )
-      );
-      setItemStatus(item.id, "done");
-    } catch (err) {
-      setItemStatus(item.id, "error", err.message);
+    }
+
+    if (workedModel) {
+      setItemStatus(item.id, "done", null, workedModel);
+    } else {
+      setItemStatus(item.id, "error", lastErr?.message || "Failed");
     }
   };
 
@@ -575,11 +442,8 @@ export default function App() {
     setBusy(true);
     // Row order follows each file's position in the queue.
     const order = new Map(queue.map((it, i) => [it.id, i]));
-    // Regex extraction is CPU-bound in the backend, so a few PDFs in flight at
-    // once overlap nicely; Ollama runs one generation at a time, keep it serial.
-    // Gemini/Claude are cloud APIs — a little concurrency is fine, but stay
-    // under typical rate limits.
-    const limit = engine === "ollama" ? 1 : engine === "gemini" || engine === "claude" ? 2 : 3;
+    // Gemini is cloud API — a little concurrency is fine, but stay under rate limits.
+    const limit = 2;
     let next = 0;
     const worker = async () => {
       while (next < targets.length) {
@@ -674,6 +538,16 @@ export default function App() {
     setPreview(null);
   };
 
+  const showErrorHover = (e, text) => {
+    setErrorHover({ text, x: e.clientX, y: e.clientY });
+  };
+  const moveErrorHover = (e) => {
+    setErrorHover((p) => (p ? { ...p, x: e.clientX, y: e.clientY } : p));
+  };
+  const hideErrorHover = () => {
+    setErrorHover(null);
+  };
+
   const cellHoverProps = (row, col) =>
     row._doc_id && row._locations?.[col]
       ? {
@@ -738,114 +612,36 @@ export default function App() {
         <div className="section-head">
           <h2>1 · Add policy PDFs</h2>
           <div className="engine-bar">
-            <span className="engine-label">Engine:</span>
-            <div className="engine-toggle">
-              <button
-                className={"engine-btn" + (engine === "regex" ? " active" : "")}
-                onClick={() => setEngine("regex")}
-              >Regex</button>
-              {ollamaStatus === "ok" && (
-                <button
-                  className={"engine-btn" + (engine === "ollama" ? " active" : "")}
-                  onClick={() => setEngine("ollama")}
-                >Ollama</button>
+            <span className="engine-label">Engine: Gemini (Google AI)</span>
+            <div className="ollama-config" style={{ marginLeft: "12px" }}>
+              {geminiStatus === "checking" && <span className="muted">Checking…</span>}
+              {geminiStatus === "no-key" && (
+                <span className="gemini-key-row">
+                  <span className="ollama-err">✕ No API key</span>
+                  <button className="key-save-btn" onClick={openSettings}>
+                    ⚙ Add key in Settings
+                  </button>
+                </span>
               )}
-              {geminiStatus === "ok" && geminiEnabled && (
-                <button
-                  className={"engine-btn" + (engine === "gemini" ? " active" : "")}
-                  onClick={() => setEngine("gemini")}
-                >Gemini</button>
+              {geminiStatus === "error" && (
+                <span className="ollama-err" title={geminiError}>
+                  ✕ {geminiError || "Not reachable"}
+                  <button className="retry-btn" onClick={checkGemini}>Retry</button>
+                </span>
               )}
-              {claudeStatus === "ok" && claudeEnabled && (
-                <button
-                  className={"engine-btn" + (engine === "claude" ? " active" : "")}
-                  onClick={() => setEngine("claude")}
-                >Claude</button>
+              {geminiStatus === "ok" && (
+                <>
+                  <ModelDropdown
+                    models={geminiModels}
+                    value={geminiModel}
+                    onChange={setGeminiModel}
+                  />
+                  <span className="muted engine-cloud-note" title="The Gemini engine sends document contents to Google's API.">
+                    ☁ sends PDFs to Google
+                  </span>
+                </>
               )}
             </div>
-            {engine === "ollama" && (
-              <div className="ollama-config">
-                {ollamaStatus === "checking" && <span className="muted">Checking…</span>}
-                {ollamaStatus === "error" && (
-                  <span className="ollama-err" title={ollamaError}>
-                    ✕ Not reachable
-                    <button className="retry-btn" onClick={() => checkOllama({ attempts: 3 })}>Retry</button>
-                  </span>
-                )}
-                {ollamaStatus === "ok" && ollamaModels.length === 0 && (
-                  <span className="muted">No models installed</span>
-                )}
-                {ollamaStatus === "ok" && ollamaModels.length > 0 && (
-                  <ModelDropdown
-                    models={ollamaModels}
-                    value={ollamaModel}
-                    onChange={setOllamaModel}
-                  />
-                )}
-              </div>
-            )}
-            {engine === "gemini" && (
-              <div className="ollama-config">
-                {geminiStatus === "checking" && <span className="muted">Checking…</span>}
-                {geminiStatus === "no-key" && (
-                  <span className="gemini-key-row">
-                    <span className="ollama-err">✕ No API key</span>
-                    <button className="key-save-btn" onClick={openSettings}>
-                      ⚙ Add key in Settings
-                    </button>
-                  </span>
-                )}
-                {geminiStatus === "error" && (
-                  <span className="ollama-err" title={geminiError}>
-                    ✕ {geminiError || "Not reachable"}
-                    <button className="retry-btn" onClick={checkGemini}>Retry</button>
-                  </span>
-                )}
-                {geminiStatus === "ok" && (
-                  <>
-                    <ModelDropdown
-                      models={geminiModels}
-                      value={geminiModel}
-                      onChange={setGeminiModel}
-                    />
-                    <span className="muted engine-cloud-note" title="Unlike Regex/Ollama, the Gemini engine sends document contents to Google's API.">
-                      ☁ sends PDFs to Google
-                    </span>
-                  </>
-                )}
-              </div>
-            )}
-            {engine === "claude" && (
-              <div className="ollama-config">
-                {claudeStatus === "checking" && <span className="muted">Checking…</span>}
-                {claudeStatus === "no-key" && (
-                  <span className="gemini-key-row">
-                    <span className="ollama-err">✕ No API key</span>
-                    <button className="key-save-btn" onClick={openSettings}>
-                      ⚙ Add key in Settings
-                    </button>
-                  </span>
-                )}
-                {claudeStatus === "error" && (
-                  <span className="ollama-err" title={claudeError}>
-                    ✕ {claudeError || "Not reachable"}
-                    <button className="retry-btn" onClick={checkClaude}>Retry</button>
-                  </span>
-                )}
-                {claudeStatus === "ok" && (
-                  <>
-                    <ModelDropdown
-                      models={claudeModels}
-                      value={claudeModel}
-                      onChange={setClaudeModel}
-                    />
-                    <span className="muted engine-cloud-note" title="Unlike Regex/Ollama, the Claude engine sends document contents to Anthropic's API.">
-                      ☁ sends PDFs to Anthropic
-                    </span>
-                  </>
-                )}
-              </div>
-            )}
           </div>
         </div>
 
@@ -901,10 +697,17 @@ export default function App() {
                   <div className="file-box-icon">📄</div>
                   <div className="file-box-body">
                     <div className="file-box-name" title={it.name}>{it.name}</div>
+                    {it.usedModel && <div className="muted" style={{fontSize: "10px", marginTop: "2px"}}>Model: {it.usedModel}</div>}
                     {it.error && (
                       <div className="file-box-error-wrap">
-                        <div className="file-box-error">{it.error}</div>
-                        <div className="file-box-error-tooltip">{it.error}</div>
+                        <div
+                          className="file-box-error"
+                          onMouseEnter={(e) => showErrorHover(e, it.error)}
+                          onMouseMove={moveErrorHover}
+                          onMouseLeave={hideErrorHover}
+                        >
+                          {it.error}
+                        </div>
                       </div>
                     )}
                     {it.status === "error" && (
@@ -1035,6 +838,22 @@ export default function App() {
         </div>
       )}
 
+      {errorHover && (
+        <div
+          className="file-box-error-tooltip"
+          style={{
+            display: "block",
+            position: "fixed",
+            left: Math.min(errorHover.x + 15, window.innerWidth - 300),
+            top: Math.min(errorHover.y + 15, window.innerHeight - 80),
+            bottom: "auto",
+            zIndex: 9999,
+          }}
+        >
+          {errorHover.text}
+        </div>
+      )}
+
       {settingsOpen && (
         <div className="modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setSettingsOpen(false); }}>
           <div className="modal-card">
@@ -1046,19 +865,6 @@ export default function App() {
             <div className="settings-section">
               <div className="settings-section-head">
                 <h3>Gemini API key</h3>
-                <label
-                  className="provider-toggle"
-                  title={geminiEnabled ? "Hide the Gemini engine" : "Show the Gemini engine"}
-                >
-                  <input
-                    type="checkbox"
-                    checked={geminiEnabled}
-                    disabled={geminiEnabledSaving || !geminiKeyInfo?.key_set}
-                    onChange={(e) => setGeminiEnabledRemote(e.target.checked)}
-                  />
-                  <span className="provider-toggle-track"><span className="provider-toggle-thumb" /></span>
-                  <span className="provider-toggle-label">{geminiEnabled ? "On" : "Off"}</span>
-                </label>
               </div>
               <p className="muted settings-hint">
                 Used by the <strong>Gemini</strong> engine. Stored locally in{" "}
@@ -1105,67 +911,7 @@ export default function App() {
               {geminiKeyError && <div className="ollama-err">✕ {geminiKeyError}</div>}
             </div>
 
-            <div className="settings-section">
-              <div className="settings-section-head">
-                <h3>Claude API key</h3>
-                <label
-                  className="provider-toggle"
-                  title={claudeEnabled ? "Hide the Claude engine" : "Show the Claude engine"}
-                >
-                  <input
-                    type="checkbox"
-                    checked={claudeEnabled}
-                    disabled={claudeEnabledSaving}
-                    onChange={(e) => setClaudeEnabledRemote(e.target.checked)}
-                  />
-                  <span className="provider-toggle-track"><span className="provider-toggle-thumb" /></span>
-                  <span className="provider-toggle-label">{claudeEnabled ? "On" : "Off"}</span>
-                </label>
-              </div>
-              <p className="muted settings-hint">
-                Used by the <strong>Claude</strong> engine. Stored locally in{" "}
-                <code>~/.pdfxl_config.json</code> — it never leaves this machine
-                except to call Anthropic's API. Get a key from{" "}
-                <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer">
-                  the Anthropic Console
-                </a>.
-              </p>
 
-              {claudeKeyInfo?.key_set ? (
-                <div className="settings-key-current">
-                  <span className="settings-key-masked">{claudeKeyInfo.masked}</span>
-                  {claudeKeyInfo.source === "env" ? (
-                    <span className="muted">from environment variable (remove it from your shell to change)</span>
-                  ) : (
-                    <button className="retry-btn" onClick={removeClaudeKey}>Remove</button>
-                  )}
-                </div>
-              ) : (
-                <div className="muted settings-key-current">No key configured.</div>
-              )}
-
-              {claudeKeyInfo?.source !== "env" && (
-                <div className="gemini-key-row">
-                  <input
-                    className="gemini-key-input settings-key-input"
-                    type="password"
-                    placeholder={claudeKeyInfo?.key_set ? "Paste a new key to replace it" : "Paste Claude API key"}
-                    value={claudeKeyInput}
-                    onChange={(e) => setClaudeKeyInput(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter") saveClaudeKey(); }}
-                    disabled={claudeSavingKey}
-                  />
-                  <button
-                    className="key-save-btn"
-                    onClick={saveClaudeKey}
-                    disabled={claudeSavingKey || !claudeKeyInput.trim()}
-                  >
-                    {claudeSavingKey ? "Validating…" : "Save"}
-                  </button>
-                </div>
-              )}
-              {claudeKeyError && <div className="ollama-err">✕ {claudeKeyError}</div>}
-            </div>
           </div>
         </div>
       )}

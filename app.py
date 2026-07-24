@@ -10,6 +10,14 @@ Run:
 Then open http://127.0.0.1:5001 in your browser.
 """
 
+# Deferred annotation evaluation — required so this module still imports under
+# Python 3.8 (the Windows build target for Windows 7 support). Without it,
+# `X | None` and `list[...]`/`dict[...]`/`tuple[...]` type hints below raise
+# TypeError at import time on 3.8 (PEP 604 unions and builtin generic
+# subscripting are 3.10+/3.9+ features). Safe on any Python version since
+# nothing in this module calls typing.get_type_hints() at runtime.
+from __future__ import annotations
+
 import os
 import io
 import sys
@@ -27,7 +35,6 @@ import subprocess
 import collections
 import webbrowser
 import urllib.request
-import concurrent.futures
 from functools import lru_cache
 
 logging.basicConfig(
@@ -70,22 +77,12 @@ from PIL import Image, ImageDraw
 
 from extract_policies import (
     read_document,
-    extract_fields,
-    process_pdf,
-    extract_fields_ollama,
-    extract_fields_ollama_vision,
     extract_fields_gemini,
     extract_fields_gemini_vision,
-    extract_fields_claude,
-    extract_fields_claude_vision,
     locate_fields,
-    vision_row_is_credible,
     _is_text_poor,
-    _is_vision_model,
     _LLM_FIELDS,
-    ollama_status,
     gemini_status,
-    claude_status,
 )
 
 # When frozen by PyInstaller, bundled data lives under sys._MEIPASS. In a normal
@@ -167,14 +164,12 @@ def _augment_row(row: dict, pdf_path: str, copy: bool, pages_words=None, locatio
 # ── Secure API-key storage ──────────────────────────────────────────────────
 # The env var wins; otherwise keys saved from the UI live in the macOS
 # Keychain (encrypted at rest, gated by the user's login session) — never in
-# a plaintext file. Non-macOS platforms fall back to the config file, which
-# also holds non-secret settings like the per-provider on/off switches.
+# a plaintext file. Non-macOS platforms fall back to the config file.
 _CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".pdfxl_config.json")
 _CONFIG_LOCK = threading.Lock()
 _KEYCHAIN_OK = sys.platform == "darwin"
 _KEYCHAIN_ACCOUNT = os.environ.get("USER") or "pdfxl"
 _GEMINI_KEYCHAIN_SERVICE = "pdfxl-gemini-api-key"
-_CLAUDE_KEYCHAIN_SERVICE = "pdfxl-anthropic-api-key"
 
 
 def _keychain_get(service: str) -> str:
@@ -278,100 +273,6 @@ def _gemini_key_info() -> dict:
     return {"key_set": True, "masked": masked, "source": "env" if env_key else "saved"}
 
 
-# ── Claude (Anthropic) API key ──────────────────────────────────────────────
-# Same env-var-wins-then-Keychain pattern as the Gemini key above.
-def _load_saved_claude_key() -> str:
-    return _load_saved_key(_CLAUDE_KEYCHAIN_SERVICE, "anthropic_api_key")
-
-
-def _save_claude_key(key: str) -> None:
-    _save_key(_CLAUDE_KEYCHAIN_SERVICE, "anthropic_api_key", key)
-
-
-def _claude_key() -> str:
-    return os.environ.get("ANTHROPIC_API_KEY") or _load_saved_claude_key()
-
-
-def _claude_key_info() -> dict:
-    """Describe the configured key for the settings UI (never the key itself)."""
-    env_key = os.environ.get("ANTHROPIC_API_KEY")
-    key = env_key or _load_saved_claude_key()
-    if not key:
-        return {"key_set": False, "masked": "", "source": ""}
-    masked = key[:4] + "…" + key[-4:] if len(key) > 12 else "•••"
-    return {"key_set": True, "masked": masked, "source": "env" if env_key else "saved"}
-
-
-# ── Per-provider on/off switch (Settings UI) ─────────────────────────────────
-# Independent of key validity: lets a user hide Gemini/Claude from the engine
-# bar even when a valid key is configured. Defaults to on.
-def _load_provider_enabled(config_key: str) -> bool:
-    try:
-        with open(_CONFIG_PATH, encoding="utf-8") as f:
-            cfg = json.load(f)
-        val = cfg.get(config_key)
-        return True if val is None else bool(val)
-    except (OSError, ValueError):
-        return True
-
-
-def _save_provider_enabled(config_key: str, enabled: bool) -> None:
-    with _CONFIG_LOCK:
-        cfg = {}
-        try:
-            with open(_CONFIG_PATH, encoding="utf-8") as f:
-                cfg = json.load(f)
-            if not isinstance(cfg, dict):
-                cfg = {}
-        except (OSError, ValueError):
-            pass
-        cfg[config_key] = bool(enabled)
-        with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2)
-
-
-def _gemini_enabled() -> bool:
-    return _load_provider_enabled("gemini_enabled")
-
-
-def _claude_enabled() -> bool:
-    return _load_provider_enabled("claude_enabled")
-
-
-# ── Extraction process pool ─────────────────────────────────────────────────
-# pdfminer parsing is pure Python, so concurrent requests only truly overlap
-# in worker processes (threads just contend on the GIL). Created lazily on the
-# first regex extraction; skipped in frozen builds where multiprocessing under
-# PyInstaller is fragile.
-_POOL: concurrent.futures.ProcessPoolExecutor | None = None
-_POOL_LOCK = threading.Lock()
-
-
-def _pool() -> concurrent.futures.ProcessPoolExecutor:
-    global _POOL
-    with _POOL_LOCK:
-        if _POOL is None:
-            _POOL = concurrent.futures.ProcessPoolExecutor(
-                max_workers=min(4, os.cpu_count() or 1)
-            )
-            atexit.register(_POOL.shutdown, wait=False, cancel_futures=True)
-        return _POOL
-
-
-def _process_pdf(path: str) -> tuple[dict, dict]:
-    """Run the regex pipeline for one PDF, in a worker process when possible."""
-    global _POOL
-    if getattr(sys, "frozen", False):
-        return process_pdf(path)
-    try:
-        return _pool().submit(process_pdf, path).result()
-    except concurrent.futures.process.BrokenProcessPool:
-        logger.warning("Extraction process pool broke; retrying in-process")
-        with _POOL_LOCK:
-            _POOL = None
-        return process_pdf(path)
-
-
 @lru_cache(maxsize=8)
 def _render_page(doc_id: str, page_no: int) -> Image.Image:
     """Render a full PDF page to a PIL image (cached; treat result as read-only)."""
@@ -381,7 +282,11 @@ def _render_page(doc_id: str, page_no: int) -> Image.Image:
         raise KeyError(doc_id)
     pdf = pdfium.PdfDocument(path)
     try:
-        return pdf[page_no].render(scale=_PREVIEW_SCALE).to_pil().convert("RGB")
+        page = pdf[page_no]
+        if hasattr(page, "render_topil"):
+            return page.render_topil(scale=_PREVIEW_SCALE).convert("RGB")
+        else:
+            return page.render(scale=_PREVIEW_SCALE).to_pil().convert("RGB")
     finally:
         pdf.close()
 
@@ -471,98 +376,30 @@ def scan():
     return jsonify({"files": files})
 
 
-def _do_extract(path: str, text: str, engine: str, model: str) -> dict:
-    if engine == "ollama":
-        if not model:
-            raise ValueError("No Ollama model specified")
-        name = os.path.basename(path)
-        text_ok = not _is_text_poor(text)
-        # Use the image path when the user picked a vision model, or when the
-        # text layer is too poor for text extraction to work on its own.
-        if _is_vision_model(model) or not text_ok:
-            why = "vision model" if _is_vision_model(model) else "poor text layer"
-            logger.info("Using vision extraction for %s (%s)", name, why)
-            try:
-                row = extract_fields_ollama_vision(path, model)
-                # Small vision models that can't read the page fill the JSON
-                # with invented values. When the PDF has a good text layer we
-                # can verify the answer against it — and fall back to text
-                # extraction instead of returning fabricated data.
-                if not text_ok or vision_row_is_credible(row, text):
-                    return row
-                logger.warning(
-                    "Vision result for %s looks hallucinated (none of the "
-                    "extracted values appear in the PDF text); falling back "
-                    "to text extraction", name,
-                )
-            except Exception as exc:
-                logger.warning("Vision extraction failed (%s), falling back to text", exc)
-        row = extract_fields_ollama(text, model)
-        if all(not row.get(k) for k in _LLM_FIELDS):
-            # Vision-only models (e.g. moondream) are poor text extractors and
-            # can come back completely empty — regex still yields real data.
-            logger.warning(
-                "Ollama text extraction with %s found no fields for %s; "
-                "using regex extraction instead", model, name,
-            )
-            return extract_fields(text)
-        return row
-    if engine == "gemini":
-        if not model:
-            model = "gemini-2.5-flash"
-        key = _gemini_key()
-        name = os.path.basename(path)
-        # Gemini models are all multimodal, so route on the text layer alone:
-        # good text goes as a (cheap, fast) text prompt, a poor/scanned layer
-        # sends the PDF itself.
-        if not _is_text_poor(text):
-            row = extract_fields_gemini(text, model, key)
-            if any(row.get(k) for k in _LLM_FIELDS):
-                return row
-            logger.warning(
-                "Gemini text extraction found no fields for %s; retrying with "
-                "the PDF itself", name,
-            )
-        return extract_fields_gemini_vision(path, model, key)
-    if engine == "claude":
-        if not model:
-            model = "claude-3-5-sonnet-20241022"
-        key = _claude_key()
-        name = os.path.basename(path)
-        # Every Claude model is multimodal, so route on the text layer alone,
-        # same as Gemini: good text goes as a cheap text prompt, a poor/scanned
-        # layer sends the PDF itself.
-        if not _is_text_poor(text):
-            row = extract_fields_claude(text, model, key)
-            if any(row.get(k) for k in _LLM_FIELDS):
-                return row
-            logger.warning(
-                "Claude text extraction found no fields for %s; retrying with "
-                "the PDF itself", name,
-            )
-        return extract_fields_claude_vision(path, model, key)
-    return extract_fields(text)
+def _do_extract(path: str, text: str, model: str) -> dict:
+    if not model:
+        model = "gemini-2.5-flash"
+    key = _gemini_key()
+    name = os.path.basename(path)
+    # Gemini models are all multimodal, so route on the text layer alone:
+    # good text goes as a (cheap, fast) text prompt, a poor/scanned layer
+    # sends the PDF itself.
+    if not _is_text_poor(text):
+        row = extract_fields_gemini(text, model, key)
+        if any(row.get(k) for k in _LLM_FIELDS):
+            return row
+        logger.warning(
+            "Gemini text extraction found no fields for %s; retrying with "
+            "the PDF itself", name,
+        )
+    return extract_fields_gemini_vision(path, model, key)
 
 
-_ENGINES = ("regex", "ollama", "gemini", "claude")
-
-
-def _extract_one(path, engine="regex", model=""):
-    if engine == "regex":
-        # Whole pipeline (one parse for fields + preview locations) in a worker.
-        row, locations = _process_pdf(path)
-        row["Source File"] = os.path.basename(path)
-        return _augment_row(row, path, copy=False, locations=locations)
+def _extract_one(path, model=""):
     text, pages_words = read_document(path)
-    row = _do_extract(path, text, engine, model)
+    row = _do_extract(path, text, model)
     row["Source File"] = os.path.basename(path)
     return _augment_row(row, path, copy=False, pages_words=pages_words)
-
-
-@app.route("/api/ollama/status", methods=["GET"])
-def api_ollama_status():
-    """Return Ollama availability and installed models."""
-    return jsonify(ollama_status())
 
 
 @app.route("/api/gemini/status", methods=["GET"])
@@ -571,20 +408,7 @@ def api_gemini_status():
     key = _gemini_key()
     status = gemini_status(key)
     status["key_set"] = bool(key)
-    status["enabled"] = _gemini_enabled()
     return jsonify(status)
-
-
-@app.route("/api/gemini/enabled", methods=["POST"])
-def api_gemini_enabled():
-    """Toggle whether the Gemini engine is offered in the UI (Settings)."""
-    data = request.get_json(silent=True) or {}
-    enabled = bool(data.get("enabled", True))
-    try:
-        _save_provider_enabled("gemini_enabled", enabled)
-    except OSError as e:
-        return jsonify({"ok": False, "error": f"Could not update config: {e}"}), 500
-    return jsonify({"ok": True, "enabled": enabled})
 
 
 @app.route("/api/gemini/key", methods=["GET", "POST", "DELETE"])
@@ -621,62 +445,6 @@ def api_gemini_key():
     return jsonify(status)
 
 
-@app.route("/api/claude/status", methods=["GET"])
-def api_claude_status():
-    """Return Claude availability (key configured + valid) and usable models."""
-    key = _claude_key()
-    status = claude_status(key)
-    status["key_set"] = bool(key)
-    status["enabled"] = _claude_enabled()
-    return jsonify(status)
-
-
-@app.route("/api/claude/enabled", methods=["POST"])
-def api_claude_enabled():
-    """Toggle whether the Claude engine is offered in the UI (Settings)."""
-    data = request.get_json(silent=True) or {}
-    enabled = bool(data.get("enabled", True))
-    try:
-        _save_provider_enabled("claude_enabled", enabled)
-    except OSError as e:
-        return jsonify({"ok": False, "error": f"Could not update config: {e}"}), 500
-    return jsonify({"ok": True, "enabled": enabled})
-
-
-@app.route("/api/claude/key", methods=["GET", "POST", "DELETE"])
-def api_claude_key():
-    """Manage the locally stored Claude (Anthropic) API key (settings UI).
-
-    GET    → masked description of the configured key (never the key itself).
-    POST   → validate {"api_key": ...} against Anthropic and save it.
-    DELETE → forget the saved key (an env-var key cannot be removed from here).
-    """
-    if request.method == "GET":
-        return jsonify(_claude_key_info())
-
-    if request.method == "DELETE":
-        try:
-            _save_claude_key("")
-        except OSError as e:
-            return jsonify({"ok": False, "error": f"Could not update config: {e}"}), 500
-        return jsonify({"ok": True, **_claude_key_info()})
-
-    data = request.get_json(silent=True) or {}
-    key = (data.get("api_key") or "").strip()
-    if not key:
-        return jsonify({"ok": False, "error": "Empty API key"}), 400
-    status = claude_status(key)  # listing models doubles as key validation
-    if not status.get("ok"):
-        status.update(_claude_key_info())
-        return jsonify(status), 400
-    try:
-        _save_claude_key(key)
-    except OSError as e:
-        return jsonify({"ok": False, "error": f"Could not save key: {e}"}), 500
-    status.update(_claude_key_info())
-    return jsonify(status)
-
-
 @app.route("/api/extract", methods=["POST"])
 def extract():
     """
@@ -684,29 +452,22 @@ def extract():
 
     Accepts either a multipart upload (field name "file") for drag-and-dropped
     files, or JSON {"path": "/abs/path.pdf"} for files already on disk.
-    Optional fields: "engine" ("regex"|"ollama"|"gemini"|"claude"), "model" (model name).
+    Optional fields: "model" (model name).
     """
     # multipart upload (drag & drop)
     if "file" in request.files:
         f = request.files["file"]
         name = f.filename or "uploaded.pdf"
-        engine = request.form.get("engine", "regex")
         model = request.form.get("model", "")
-        if engine not in _ENGINES:
-            return jsonify({"error": f"Unknown engine: {engine}", "source": name}), 400
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
             # Save through the open handle (re-opening by name breaks on Windows).
             f.save(tmp)
             tmp_path = tmp.name
         try:
-            if engine == "regex":
-                row, locations = _process_pdf(tmp_path)
-                row["Source File"] = name
-                # copy=True keeps a copy alive for previews after the temp is removed
-                return jsonify({"row": _augment_row(row, tmp_path, copy=True, locations=locations)})
             text, pages_words = read_document(tmp_path)
-            row = _do_extract(tmp_path, text, engine, model)
+            row = _do_extract(tmp_path, text, model)
             row["Source File"] = name
+            # copy=True keeps a copy alive for previews after the temp is removed
             return jsonify({"row": _augment_row(row, tmp_path, copy=True, pages_words=pages_words)})
         except Exception as e:  # noqa: BLE001
             return jsonify({"error": str(e), "source": name}), 500
@@ -719,14 +480,11 @@ def extract():
     # path on disk (folder scan)
     data = request.get_json(silent=True) or {}
     path = (data.get("path") or "").strip()
-    engine = data.get("engine", "regex")
     model = data.get("model", "")
-    if engine not in _ENGINES:
-        return jsonify({"error": f"Unknown engine: {engine}"}), 400
     if not path or not os.path.isfile(path):
         return jsonify({"error": f"Not a file: {path}"}), 400
     try:
-        return jsonify({"row": _extract_one(path, engine, model)})
+        return jsonify({"row": _extract_one(path, model)})
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": str(e), "source": os.path.basename(path)}), 500
 

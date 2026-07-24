@@ -61,6 +61,30 @@ frozen Python + a browser can run":
 The only runtime requirement on the target machine is *some* installed
 browser (all of the above ship one by default) — nothing else to install.
 
+### Why the Windows CI job is pinned to Python 3.8
+
+CPython 3.9+ does not run on Windows 7 at all — this isn't just an installer
+restriction, the interpreter itself won't launch there (Python 3.8 was the
+last version to support it). PyInstaller bundles whichever Python built it,
+so **the Windows build job in `.github/workflows/build.yml` must use Python
+3.8** or the frozen `.exe` silently stops working on Windows 7 even though
+`installer.iss`'s `MinVersion=6.1sp1` still lets the installer run there.
+macOS/Linux have no such floor and stay on a current Python version.
+
+If you ever bump the Windows job's Python version, either keep it at 3.8 or
+explicitly drop Windows 7 from the supported-OS table above, the installer's
+`MinVersion`, and this note — don't let them drift out of sync.
+
+All of `app.py` and `extract_policies.py` use `from __future__ import
+annotations` specifically so their type hints (`X | None`, `list[...]`,
+`dict[...]`) — which need Python 3.9/3.10+ to *evaluate* — still work when
+frozen with 3.8. Keep that import if you add more modules with modern type
+hints to the frozen app.
+
+`run.ps1` / `run.sh` (the "run from source" launchers) warn rather than fail
+outright when the Python on PATH is too new for Windows 7, since the app's
+only extraction engine (Gemini) needs no local runtime beyond Python itself.
+
 ## App icons
 
 Icons live in `assets/` (`icon.ico` for Windows, `icon.png` used for the
