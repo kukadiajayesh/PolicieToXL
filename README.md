@@ -25,8 +25,7 @@ the React UI on first run, starts the server):
 ```
 
 Or double-click **`Start Policy Extractor.command`** in Finder — it runs
-`run.sh` in the background and opens the browser automatically once the
-server is up.
+`run.sh` in the background; open http://127.0.0.1:5001 once the server is up.
 
 **Windows — one command** (PowerShell equivalent of `run.sh`):
 
@@ -48,8 +47,7 @@ cd frontend && npm install && npm run build && cd ..
 python3 app.py
 ```
 
-Then open **http://127.0.0.1:5001** (opens automatically in your default
-browser when started via `run.sh` / `run.ps1` / `python3 app.py`).
+Then open **http://127.0.0.1:5001** in your browser.
 
 See `PACKAGING.md` for building a standalone installer/binary (Windows/macOS/Linux).
 

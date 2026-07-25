@@ -40,20 +40,5 @@ if (-not (Test-Path "frontend\dist\index.html")) {
     Pop-Location
 }
 
-# ── Open default browser once the server answers ────────────────────────────
-$URL = "http://127.0.0.1:5001"
-Start-Job -ScriptBlock {
-    param($url)
-    for ($i = 0; $i -lt 60; $i++) {
-        try {
-            Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 | Out-Null
-            Start-Process $url
-            break
-        } catch {
-            Start-Sleep -Seconds 1
-        }
-    }
-} -ArgumentList $URL | Out-Null
-
 Write-Host "→ Starting server at http://127.0.0.1:5001"
 python app.py

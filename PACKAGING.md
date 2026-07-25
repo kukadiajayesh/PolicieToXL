@@ -1,6 +1,6 @@
 # Packaging — standalone binary
 
-The app is a local Flask server that opens itself in the OS's **default
+The app is a local Flask server viewed through the OS's **default
 browser** — there's no native window, no bundled Chromium, and no GUI
 toolkit dependency (WebView2 / WKWebView / WebKitGTK). The Python backend is
 frozen by **PyInstaller**; the React UI is built once to static files and
@@ -8,8 +8,7 @@ bundled inside the executable.
 
 ```
 app.py  ──serves──▶  frontend/dist (React UI) + /api/* (Flask)
-   │                      └─ extract_policies.py (pdfplumber + pandas + openpyxl)
-   └──opens──▶  the OS default browser, pointed at http://127.0.0.1:5001
+                          └─ extract_policies.py (pdfplumber + pandas + openpyxl)
 ```
 
 ## Run from source
@@ -20,8 +19,8 @@ cd frontend && npm install && npm run build && cd ..
 python app.py
 ```
 
-This starts the server, prints its URL, and opens it in your default browser
-automatically. Ctrl+C in the terminal stops the server.
+This starts the server and prints its URL — open it in a browser. Ctrl+C in
+the terminal stops the server.
 
 ## Build a standalone binary
 

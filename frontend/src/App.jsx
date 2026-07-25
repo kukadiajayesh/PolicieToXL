@@ -103,6 +103,11 @@ const COLUMNS = [
   "Source File",
 ];
 
+const COLUMN_HELP = {
+  "NCB (applied this yr)":
+    "Read directly off the policy document (not calculated) — the model looks for the no-claim bonus % printed on the page and copies it as-is. Hover the 🔍 on a row to see where in the PDF it was found.",
+};
+
 const STATUS = {
   pending: { label: "Pending", cls: "badge pending" },
   reading: { label: "Reading…", cls: "badge reading" },
@@ -554,25 +559,8 @@ export default function App() {
           onMouseEnter: (e) => showPreview(e, row, col),
           onMouseMove: movePreview,
           onMouseLeave: hidePreview,
-          onClick: (e) => {
-            e.stopPropagation();
-            openPdf(row._doc_id);
-          },
         }
       : {};
-
-  const openPdf = (docId) => {
-    if (!docId) return;
-    // Create a temporary link to trigger the PDF download/view
-    // This approach is less likely to be blocked by popup blockers than window.open
-    const link = document.createElement('a');
-    link.href = `/api/open-pdf?doc_id=${docId}`;
-    // We don't set download attribute because we want to potentially display inline
-    // depending on browser capabilities and plugin/settings
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
 
   const counts = useMemo(() => {
     const c = { pending: 0, reading: 0, done: 0, error: 0 };
@@ -745,7 +733,9 @@ export default function App() {
               <thead>
                 <tr>
                   <th className="rownum">#</th>
-                  {COLUMNS.map((c) => <th key={c}>{c}</th>)}
+                  {COLUMNS.map((c) => (
+                    <th key={c} title={COLUMN_HELP[c]}>{c}</th>
+                  ))}
                   <th></th>
                 </tr>
               </thead>
@@ -757,7 +747,7 @@ export default function App() {
                       const raw = row[c] ?? "";
                       const hasLoc = !!(row._doc_id && row._locations?.[c]);
                       const verifyBadge = hasLoc ? (
-                        <span className="verify-badge" title="Click to open PDF">🔍</span>
+                        <span className="verify-badge" title="Hover to preview from PDF">🔍</span>
                       ) : null;
                       const tdClass = (base) =>
                         (base ? base + " " : "") + (hasLoc ? "has-loc" : "");
