@@ -74,6 +74,15 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install innosetup --no-progress -y
 
+      # Bundled into the installer so Windows 7 machines (which don't ship
+      # the Universal C Runtime the frozen Python 3.8 exe needs) still launch
+      # the app — see the comment on VCRedistNeedsInstall in installer.iss.
+      - name: Download VC++ redistributable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "packaging\windows\vc_redist.x64.exe"
+
       - name: Build Windows installer
         if: runner.os == 'Windows'
         shell: pwsh

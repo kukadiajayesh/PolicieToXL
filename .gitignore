@@ -16,6 +16,9 @@ venv/
 # Runtime logs
 app.log
 
+# Downloaded at build time by build.yml, not committed
+packaging/windows/vc_redist.x64.exe
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db

@@ -50,6 +50,13 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Bundled by the CI build step (not committed to git — see build.yml). The
+; frozen Python 3.8 exe links against the Universal C Runtime, which ships
+; built into Windows 10+ but is NOT present on a stock Windows 7 SP1 install;
+; without it the app fails to launch at all with a missing api-ms-win-crt-*.dll
+; error, even though this installer's MinVersion=6.1sp1 runs fine. Skipped
+; automatically (see VCRedistNeedsInstall) when already present.
+Source: "vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -57,4 +64,16 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
+Filename: "{tmp}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "Installing Visual C++ runtime (needed on Windows 7)…"; Check: VCRedistNeedsInstall; Flags: waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// Skip the (silent, ~15s) redistributable install whenever a new-enough
+// VC++ 2015-2022 x64 runtime is already on the machine — true on Windows 10/11
+// and on any Windows 7 box that already has it from another app.
+function VCRedistNeedsInstall: Boolean;
+var
+  Installed: Cardinal;
+begin
+  Result := not (RegQueryDWordValue(HKLM, 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64', 'Installed', Installed) and (Installed = 1));
+end;

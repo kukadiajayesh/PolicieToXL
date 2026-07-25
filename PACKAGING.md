@@ -120,6 +120,19 @@ but does not create a Release (releases happen only on tag pushes).
 - **`console=True`** in `app.spec` — there's no window UI, so the console is
   the only way to see server logs and stop the app (Ctrl+C). The Linux
   `.desktop` entry sets `Terminal=true` for the same reason.
+- **Universal C Runtime on Windows 7** — the frozen Python 3.8 exe links
+  against `ucrtbase.dll` / `api-ms-win-crt-*.dll`, which ship built into
+  Windows 10+ but aren't present on a stock Windows 7 SP1 install. Without
+  them the exe fails to launch at all (`api-ms-win-crt-runtime-l1-1-0.dll was
+  not found`), even though the installer itself runs fine down to
+  `MinVersion=6.1sp1`. `installer.iss` bundles the VC++ 2015-2022 x64
+  redistributable and installs it silently before first launch (skipped if
+  already present — see `VCRedistNeedsInstall`). The CI job downloads
+  `vc_redist.x64.exe` from Microsoft before running `iscc` (see
+  `build.yml`); it isn't committed to the repo. Building the installer
+  locally/manually needs the same file at `packaging\windows\vc_redist.x64.exe`
+  — download it from https://aka.ms/vs/17/release/vc_redist.x64.exe first, or
+  the installer will silently skip bundling it (`skipifsourcedoesntexist`).
 
 ## Code signing & distribution
 
