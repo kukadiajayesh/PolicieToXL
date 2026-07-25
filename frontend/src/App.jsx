@@ -335,6 +335,10 @@ export default function App() {
   };
 
   const addFiles = useCallback((fileList) => {
+    if (geminiStatus !== "ok") {
+      flash("Waiting for Gemini models to load — try again in a moment.", "error");
+      return;
+    }
     const pdfs = Array.from(fileList).filter((f) =>
       f.name.toLowerCase().endsWith(".pdf")
     );
@@ -351,7 +355,7 @@ export default function App() {
         status: "pending",
       })),
     ]);
-  }, []);
+  }, [geminiStatus]);
 
   const onDrop = (e) => {
     e.preventDefault();
@@ -404,8 +408,8 @@ export default function App() {
         if (!res.ok) {
           const errMsg = data.error || "Extraction failed";
           const lower = errMsg.toLowerCase();
-          const isLimit = lower.includes("quota") || lower.includes("429") || lower.includes("exhausted") || lower.includes("rate limit") || res.status === 429;
-          if (isLimit && i < modelsToTry.length - 1) {
+          const shouldRetryNext = lower.includes("quota") || lower.includes("429") || lower.includes("exhausted") || lower.includes("rate limit") || res.status === 429 || (lower.includes("unknown") && lower.includes("model"));
+          if (shouldRetryNext && i < modelsToTry.length - 1) {
             lastErr = new Error(errMsg);
             continue;
           }
@@ -422,13 +426,13 @@ export default function App() {
         break; // Succeeded!
       } catch (err) {
         const lower = err.message.toLowerCase();
-        const isLimit = lower.includes("quota") || lower.includes("429") || lower.includes("exhausted") || lower.includes("rate limit");
-        if (isLimit && i < modelsToTry.length - 1) {
+        const shouldRetryNext = lower.includes("quota") || lower.includes("429") || lower.includes("exhausted") || lower.includes("rate limit") || (lower.includes("unknown") && lower.includes("model"));
+        if (shouldRetryNext && i < modelsToTry.length - 1) {
           lastErr = err;
           continue;
         }
         lastErr = err;
-        break; // Failed and not a limit
+        break; // Failed and not retryable
       }
     }
 
@@ -493,15 +497,27 @@ export default function App() {
     setRows((r) => r.filter((_, i) => i !== rowIdx));
   };
 
+  const csvField = (value) => {
+    const s = String(value ?? "");
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+
   const copyAllData = async () => {
     if (!rows.length) return flash("No results to copy.", "error");
-    const tsv = [
-      COLUMNS.join("\t"),
-      ...rows.map((row) => COLUMNS.map((c) => String(row[c] ?? "")).join("\t")),
-    ].join("\n");
+    const csv =
+      rows.map((row) => COLUMNS.map((c) => csvField(row[c])).join(",")).join("\n") + "\n";
     try {
-      await navigator.clipboard.writeText(tsv);
+      await navigator.clipboard.writeText(csv);
       flash(`Copied ${rows.length} rows to clipboard.`, "info");
+    } catch {
+      flash("Could not copy to clipboard.", "error");
+    }
+  };
+
+  const copyError = async (text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      flash("Error copied to clipboard.", "info");
     } catch {
       flash("Could not copy to clipboard.", "error");
     }
@@ -634,22 +650,28 @@ export default function App() {
         </div>
 
         <div
-          className={"dropzone" + (dragging ? " active" : "")}
-          onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+          className={"dropzone" + (dragging ? " active" : "") + (geminiStatus !== "ok" ? " locked" : "")}
+          onDragOver={(e) => { e.preventDefault(); if (geminiStatus === "ok") setDragging(true); }}
           onDragLeave={() => setDragging(false)}
           onDrop={onDrop}
-          onClick={(e) => { if (!e.defaultPrevented) fileInput.current?.click(); }}
+          onClick={(e) => { if (!e.defaultPrevented && geminiStatus === "ok") fileInput.current?.click(); }}
         >
           <div className="dz-icon">⬆</div>
           <div className="dz-text">
-            <strong>Drag &amp; drop PDFs here</strong>
-            <div className="muted">or click to pick files</div>
-            <button
-              className="dz-folder-btn"
-              onClick={(e) => { e.preventDefault(); e.stopPropagation(); folderInput.current?.click(); }}
-            >
-              📁 Pick a folder
-            </button>
+            {geminiStatus === "ok" ? (
+              <>
+                <strong>Drag &amp; drop PDFs here</strong>
+                <div className="muted">or click to pick files</div>
+                <button
+                  className="dz-folder-btn"
+                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); folderInput.current?.click(); }}
+                >
+                  📁 Pick a folder
+                </button>
+              </>
+            ) : (
+              <div className="muted">Waiting for Gemini models to load…</div>
+            )}
           </div>
         </div>
 
@@ -660,12 +682,14 @@ export default function App() {
           accept="application/pdf"
           multiple
           hidden
+          disabled={geminiStatus !== "ok"}
           onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = ""; }}
         />
         <input
           ref={folderInput}
           type="file"
           hidden
+          disabled={geminiStatus !== "ok"}
           onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = ""; }}
         />
 
@@ -675,12 +699,6 @@ export default function App() {
             <div className="file-grid">
               {queue.map((it) => (
                 <div key={it.id} className={`file-box status-${it.status}`}>
-                  <div className="file-box-progress-track">
-                    <div
-                      className={`file-box-progress${it.status === "reading" ? " indeterminate" : ""}`}
-                      style={{ width: it.status === "done" ? "100%" : it.status === "reading" ? undefined : "0%" }}
-                    />
-                  </div>
                   <button className="file-box-x" onClick={() => removeItem(it.id)} title="Remove">×</button>
                   <div className="file-box-icon">📄</div>
                   <div className="file-box-body">
@@ -699,9 +717,21 @@ export default function App() {
                       </div>
                     )}
                     {it.status === "error" && (
-                      <button className="retry-btn" onClick={() => setItemStatus(it.id, "pending")}>
-                        Retry
-                      </button>
+                      <div className="error-actions">
+                        <button className="retry-btn" onClick={() => setItemStatus(it.id, "pending")}>
+                          Retry
+                        </button>
+                        <button
+                          className="copy-error-btn"
+                          title="Copy error"
+                          onClick={() => copyError(it.error)}
+                        >
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                          </svg>
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>
