@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import io
+import re
 import sys
 import glob
 import json
@@ -145,8 +146,16 @@ def _register_doc(src_path: str, copy: bool) -> str:
     return doc_id
 
 
+def _clean_policy_no(row: dict) -> None:
+    """Collapse stray whitespace runs the OCR/LLM sometimes inserts between digits."""
+    val = row.get("Policy No.")
+    if isinstance(val, str) and val:
+        row["Policy No."] = re.sub(r"\s+", " ", val).strip()
+
+
 def _augment_row(row: dict, pdf_path: str, copy: bool, pages_words=None, locations=None) -> dict:
     """Attach a doc_id and per-field source locations for the hover preview."""
+    _clean_policy_no(row)
     doc_id = _register_doc(pdf_path, copy=copy)
     if locations is None:
         try:
@@ -232,6 +241,20 @@ def _render_page(doc_id: str, page_no: int) -> Image.Image:
         pdf.close()
 
 
+def _clamp_box(x0, y0, x1, y1, w, h, inset=2):
+    """Keep a highlight rectangle's outline fully inside the canvas.
+
+    ImageDraw draws the outline centered on the given coordinates, so a box
+    flush with the image edge gets half its border clipped off. Nudging the
+    coordinates inward by ``inset`` keeps the full border visible.
+    """
+    x0 = max(inset, min(x0, w - inset))
+    x1 = max(inset, min(x1, w - inset))
+    y0 = max(inset, min(y0, h - inset))
+    y1 = max(inset, min(y1, h - inset))
+    return x0, y0, x1, y1
+
+
 def _render_crop(doc_id: str, page_no: int, bbox) -> bytes:
     """Return PNG bytes of a zoomed, highlighted crop around bbox (PDF points)."""
     x0, top, x1, bottom = bbox
@@ -245,8 +268,12 @@ def _render_crop(doc_id: str, page_no: int, bbox) -> bytes:
 
     overlay = Image.new("RGBA", crop.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
+    rx0, ry0, rx1, ry1 = _clamp_box(
+        x0 * s - cx0 - 2, top * s - cy0 - 2, x1 * s - cx0 + 2, bottom * s - cy0 + 2,
+        crop.width, crop.height,
+    )
     draw.rectangle(
-        [x0 * s - cx0 - 2, top * s - cy0 - 2, x1 * s - cx0 + 2, bottom * s - cy0 + 2],
+        [rx0, ry0, rx1, ry1],
         fill=(255, 214, 0, 70),
         outline=(240, 150, 0, 255),
         width=2,
@@ -258,21 +285,30 @@ def _render_crop(doc_id: str, page_no: int, bbox) -> bytes:
     return buf.getvalue()
 
 
-def _render_page_with_highlights(doc_id: str, page_no: int, boxes: list) -> bytes:
+def _render_page_with_highlights(doc_id: str, page_no: int, boxes: list, selected_label: str | None = None) -> bytes:
     """Return PNG bytes of a full page with every located field's bbox outlined.
 
-    ``boxes`` is a list of (label, (x0, top, x1, bottom)) in PDF points.
+    ``boxes`` is a list of (label, (x0, top, x1, bottom)) in PDF points. The box
+    matching ``selected_label`` (if any) is drawn last, in a distinct color and
+    thicker border, so the currently-selected field stands out.
     """
     page = _render_page(doc_id, page_no)
     s = _PREVIEW_SCALE
     overlay = Image.new("RGBA", page.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    for _label, (x0, top, x1, bottom) in boxes:
+    ordered = sorted(boxes, key=lambda b: b[0] == selected_label)
+    for label, (x0, top, x1, bottom) in ordered:
+        is_selected = label == selected_label
+        width = 3 if is_selected else 2
+        rx0, ry0, rx1, ry1 = _clamp_box(
+            x0 * s - width, top * s - width, x1 * s + width, bottom * s + width,
+            page.width, page.height, inset=width,
+        )
         draw.rectangle(
-            [x0 * s - 2, top * s - 2, x1 * s + 2, bottom * s + 2],
-            fill=(255, 214, 0, 70),
-            outline=(240, 150, 0, 255),
-            width=2,
+            [rx0, ry0, rx1, ry1],
+            fill=(255, 60, 60, 70) if is_selected else (255, 214, 0, 70),
+            outline=(220, 20, 20, 255) if is_selected else (240, 150, 0, 255),
+            width=width,
         )
     out = Image.alpha_composite(page.convert("RGBA"), overlay).convert("RGB")
     buf = io.BytesIO()
@@ -519,8 +555,9 @@ def render_page():
         except (KeyError, TypeError, ValueError, IndexError):
             continue
         boxes.append((label, box))
+    selected = request.args.get("selected") or None
     try:
-        png = _render_page_with_highlights(doc_id, page_no, boxes)
+        png = _render_page_with_highlights(doc_id, page_no, boxes, selected_label=selected)
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": str(e)}), 500
     return send_file(io.BytesIO(png), mimetype="image/png")

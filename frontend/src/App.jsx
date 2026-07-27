@@ -58,6 +58,11 @@ function formatAmount(val) {
   return "₹" + Math.round(num).toLocaleString("en-IN");
 }
 
+function formatPolicyNo(val) {
+  if (val == null || val === "") return "";
+  return String(val).replace(/\s+/g, " ").trim();
+}
+
 function toTitleCase(val) {
   if (!val) return val;
   return String(val).toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
@@ -313,9 +318,10 @@ export default function App() {
     if (logsOpen) logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs, logsOpen]);
 
-  // Re-probe Gemini when not already checking or ok.
+  // Re-probe Gemini only after a transient error — "no-key" means the user
+  // hasn't configured one yet, so retrying would just hammer the server.
   useEffect(() => {
-    if (geminiStatus !== "ok" && geminiStatus !== "checking") {
+    if (geminiStatus === "error") {
       checkGemini();
     }
   }, [geminiStatus]);
@@ -592,24 +598,71 @@ export default function App() {
   };
 
   // ── Full-screen PDF verify modal ────────────────────────────────────────
+  const docModalPageRefs = useRef({});
+  const docModalDrag = useRef(null);
+
   const openDocModal = (rowIdx) => {
     const row = rows[rowIdx];
     if (!row?._doc_id) return;
     const pages = [...new Set(Object.values(row._locations || {}).map((l) => l.page))].sort((a, b) => a - b);
     const edits = {};
-    COLUMNS.forEach((c) => { edits[c] = row[c] ?? ""; });
-    setDocModal({ rowIdx, page: pages[0] ?? 0, pages, edits });
+    COLUMNS.forEach((c) => { edits[c] = c === "Policy No." ? formatPolicyNo(row[c]) : row[c] ?? ""; });
+    docModalPageRefs.current = {};
+    setDocModal({ rowIdx, pages, edits, zoom: 1, selectedField: null });
   };
 
   const closeDocModal = () => setDocModal(null);
 
-  const renderPageUrl = (row, page) => {
+  const renderPageUrl = (row, page, selectedField) => {
     const q = new URLSearchParams({
       doc_id: row._doc_id,
       page,
       locations: JSON.stringify(row._locations || {}),
     });
+    if (selectedField) q.set("selected", selectedField);
     return `/api/render-page?${q.toString()}`;
+  };
+
+  // Selecting a field scrolls its page into view and highlights it.
+  const selectDocModalField = (col) => {
+    setDocModal((m) => (m ? { ...m, selectedField: col } : m));
+    const row = rows[docModal?.rowIdx];
+    const loc = row?._locations?.[col];
+    const el = loc ? docModalPageRefs.current[loc.page] : null;
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const ZOOM_MIN = 1;
+  const ZOOM_MAX = 3;
+  const ZOOM_STEP = 0.25;
+  const zoomDocModal = (delta) => {
+    setDocModal((m) =>
+      m ? { ...m, zoom: Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, +(m.zoom + delta).toFixed(2))) } : m
+    );
+  };
+  const resetZoomDocModal = () => setDocModal((m) => (m ? { ...m, zoom: 1 } : m));
+
+  // Drag-to-pan the PDF view (useful once zoomed in, or to scroll sideways).
+  const onDocModalMouseDown = (e) => {
+    if (e.button !== 0) return;
+    const wrap = e.currentTarget;
+    docModalDrag.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      scrollLeft: wrap.scrollLeft,
+      scrollTop: wrap.scrollTop,
+    };
+  };
+  const onDocModalMouseMove = (e) => {
+    if (!docModalDrag.current) return;
+    e.preventDefault();
+    const wrap = e.currentTarget;
+    const d = docModalDrag.current;
+    wrap.scrollLeft = d.scrollLeft - (e.clientX - d.startX);
+    wrap.scrollTop = d.scrollTop - (e.clientY - d.startY);
+  };
+  const endDocModalDrag = () => {
+    docModalDrag.current = null;
   };
 
   const submitDocModal = () => {
@@ -854,7 +907,7 @@ export default function App() {
                           <textarea
                             className="cell"
                             ref={autoGrowCell}
-                            value={CAMEL_COLS.has(c) ? toTitleCase(raw) : raw}
+                            value={CAMEL_COLS.has(c) ? toTitleCase(raw) : c === "Policy No." ? formatPolicyNo(raw) : raw}
                             onChange={(e) => editCell(i, c, e.target.value)}
                             onInput={(e) => autoGrowCell(e.target)}
                             rows={1}
@@ -930,34 +983,68 @@ export default function App() {
             </div>
             <div className="doc-modal-body">
               <div className="doc-modal-pdf">
-                {docModal.pages.length > 1 && (
-                  <div className="doc-modal-pages">
-                    {docModal.pages.map((p) => (
-                      <button
-                        key={p}
-                        className={"btn ghost" + (p === docModal.page ? " selected" : "")}
-                        onClick={() => setDocModal((m) => ({ ...m, page: p }))}
-                      >
-                        Page {p + 1}
-                      </button>
-                    ))}
+                <div className="doc-modal-toolbar">
+                  <div className="doc-modal-zoom">
+                    <button
+                      className="btn ghost zoom-btn"
+                      onClick={() => zoomDocModal(-ZOOM_STEP)}
+                      disabled={docModal.zoom <= ZOOM_MIN}
+                      title="Zoom out"
+                    >
+                      −
+                    </button>
+                    <span className="zoom-level" onClick={resetZoomDocModal} title="Reset zoom">
+                      {Math.round(docModal.zoom * 100)}%
+                    </span>
+                    <button
+                      className="btn ghost zoom-btn"
+                      onClick={() => zoomDocModal(ZOOM_STEP)}
+                      disabled={docModal.zoom >= ZOOM_MAX}
+                      title="Zoom in"
+                    >
+                      +
+                    </button>
                   </div>
-                )}
-                <div className="doc-modal-img-wrap">
-                  <img
-                    src={renderPageUrl(rows[docModal.rowIdx], docModal.page)}
-                    alt="PDF page with extracted fields highlighted"
-                    className="doc-modal-img"
-                  />
+                </div>
+                <div
+                  className="doc-modal-img-wrap"
+                  onMouseDown={onDocModalMouseDown}
+                  onMouseMove={onDocModalMouseMove}
+                  onMouseUp={endDocModalDrag}
+                  onMouseLeave={endDocModalDrag}
+                >
+                  {docModal.pages.map((p) => (
+                    <div
+                      key={p}
+                      ref={(el) => { if (el) docModalPageRefs.current[p] = el; }}
+                      className="doc-modal-page"
+                    >
+                      <img
+                        src={renderPageUrl(rows[docModal.rowIdx], p, docModal.selectedField)}
+                        alt={`PDF page ${p + 1} with extracted fields highlighted`}
+                        className="doc-modal-img"
+                        draggable={false}
+                        style={{ width: `${docModal.zoom * 100}%`, maxWidth: docModal.zoom > 1 ? "none" : "100%" }}
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div className="muted doc-modal-hint">
+                  Drag to pan · click a field to jump to it on the page
                 </div>
               </div>
               <div className="doc-modal-fields">
                 {COLUMNS.filter((c) => c !== "Source File").map((c) => (
-                  <label key={c} className="doc-modal-field">
+                  <label
+                    key={c}
+                    className={"doc-modal-field" + (docModal.selectedField === c ? " selected" : "")}
+                  >
                     <span className="doc-modal-field-label">{c}</span>
                     <input
                       className="doc-modal-field-input"
-                      value={docModal.edits[c] ?? ""}
+                      value={c === "Policy No." ? formatPolicyNo(docModal.edits[c]) : docModal.edits[c] ?? ""}
+                      onFocus={() => selectDocModalField(c)}
+                      onClick={() => selectDocModalField(c)}
                       onChange={(e) =>
                         setDocModal((m) => ({ ...m, edits: { ...m.edits, [c]: e.target.value } }))
                       }
