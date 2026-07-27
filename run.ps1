@@ -2,7 +2,9 @@
 # that ships on Windows 7 SP1 with the Windows Management Framework update).
 # Installs Python deps if needed, builds the React UI if missing, starts the app.
 $ErrorActionPreference = "Stop"
-Set-Location $PSScriptRoot
+# $PSScriptRoot is empty on PowerShell 2.0 (Windows 7's default, pre-WMF update) — fall back to $MyInvocation.
+$scriptRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+Set-Location $scriptRoot
 
 # ── Python virtual environment ───────────────────────────────────────────────
 # Running from source uses whatever `python` is on PATH — unlike the frozen

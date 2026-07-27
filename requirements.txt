@@ -10,3 +10,10 @@ pillow>=10.0,<11.0; python_version < "3.9"
 pillow>=10.0; python_version >= "3.9"
 pypdfium2>=4.0; sys_platform != "win32" or (platform_release != "7" and platform_release != "8" and platform_release != "8.1")
 pypdfium2==4.18.0; sys_platform == "win32" and (platform_release == "7" or platform_release == "8" or platform_release == "8.1")
+
+# cryptography (pulled in transitively by pdfminer.six, which requires >=36.0.0) switched
+# its Rust toolchain in the 42.x series to one that calls GetSystemTimePreciseAsFileTime,
+# a Windows 8+ API — importing it crashes with "DLL load failed" on Windows 7/8/8.1.
+# Pin to the last release built against the older toolchain for those OSes.
+cryptography>=36.0.0; sys_platform != "win32" or (platform_release != "7" and platform_release != "8" and platform_release != "8.1")
+cryptography==41.0.7; sys_platform == "win32" and (platform_release == "7" or platform_release == "8" or platform_release == "8.1")
