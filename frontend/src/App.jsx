@@ -60,7 +60,7 @@ function formatAmount(val) {
 
 function formatPolicyNo(val) {
   if (val == null || val === "") return "";
-  return String(val).replace(/\s+/g, " ").trim();
+  return String(val).replace(/\s+/g, "");
 }
 
 function toTitleCase(val) {
@@ -165,7 +165,6 @@ export default function App() {
   const [geminiSavingKey, setGeminiSavingKey] = useState(false);
   const [geminiKeyError, setGeminiKeyError] = useState("");
   const [logs, setLogs] = useState([]);
-  const [logsOpen, setLogsOpen] = useState(false);
   const [preview, setPreview] = useState(null); // {url, x, y, col, loading}
   const [errorHover, setErrorHover] = useState(null); // { text, x, y }
   const [docModal, setDocModal] = useState(null); // {rowIdx, page, pages, edits}
@@ -313,10 +312,10 @@ export default function App() {
     return () => es.close();
   }, []);
 
-  // Auto-scroll log panel when open
+  // Keep the newest line in view
   useEffect(() => {
-    if (logsOpen) logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [logs, logsOpen]);
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [logs]);
 
   // Re-probe Gemini only after a transient error — "no-key" means the user
   // hasn't configured one yet, so retrying would just hammer the server.
@@ -511,10 +510,13 @@ export default function App() {
     setRows([]);
   };
 
-  const editCell = (rowIdx, col, value) =>
+  const editCell = (rowIdx, col, value) => {
+    // Policy numbers are stored space-free so the export matches what's shown.
+    const next = col === "Policy No." ? formatPolicyNo(value) : value;
     setRows((r) =>
-      r.map((row, i) => (i === rowIdx ? { ...row, [col]: value } : row))
+      r.map((row, i) => (i === rowIdx ? { ...row, [col]: next } : row))
     );
+  };
 
   const deleteRow = (rowIdx) => {
     // Drop the file's card too — leaving it "pending" would make the
@@ -938,22 +940,15 @@ export default function App() {
         )}
       </section>
 
-      {/* Log panel */}
-      <section className={"card log-panel" + (logsOpen ? " open" : "")}>
-        <button className="log-panel-header" onClick={() => setLogsOpen((v) => !v)}>
-          <span>Logs</span>
-          <span className="log-count">{logs.length}</span>
-          <span className="log-chevron">{logsOpen ? "▲" : "▼"}</span>
-        </button>
-        {logsOpen && (
-          <div className="log-body">
-            {logs.length === 0
-              ? <span className="muted">No logs yet.</span>
-              : logs.map((line, i) => <div key={i} className="log-line">{line}</div>)
-            }
-            <div ref={logsEndRef} />
-          </div>
-        )}
+      {/* Log panel — always shows the 10 most recent lines */}
+      <section className="card log-panel">
+        <div className="log-body">
+          {logs.length === 0
+            ? <span className="muted">No logs yet.</span>
+            : logs.slice(-10).map((line, i) => <div key={i} className="log-line">{line}</div>)
+          }
+          <div ref={logsEndRef} />
+        </div>
       </section>
 
       {preview && (
@@ -985,7 +980,30 @@ export default function App() {
             </div>
             <div className="doc-modal-body">
               <div className="doc-modal-pdf">
-                <div className="doc-modal-toolbar">
+                <div className="doc-modal-viewer">
+                  <div
+                    className="doc-modal-img-wrap"
+                    onMouseDown={onDocModalMouseDown}
+                    onMouseMove={onDocModalMouseMove}
+                    onMouseUp={endDocModalDrag}
+                    onMouseLeave={endDocModalDrag}
+                  >
+                    {docModal.pages.map((p) => (
+                      <div
+                        key={p}
+                        ref={(el) => { if (el) docModalPageRefs.current[p] = el; }}
+                        className="doc-modal-page"
+                      >
+                        <img
+                          src={renderPageUrl(rows[docModal.rowIdx], p, docModal.selectedField)}
+                          alt={`PDF page ${p + 1} with extracted fields highlighted`}
+                          className="doc-modal-img"
+                          draggable={false}
+                          style={{ width: `${docModal.zoom * 100}%`, maxWidth: docModal.zoom > 1 ? "none" : "100%" }}
+                        />
+                      </div>
+                    ))}
+                  </div>
                   <div className="doc-modal-zoom">
                     <button
                       className="btn ghost zoom-btn"
@@ -1008,29 +1026,6 @@ export default function App() {
                     </button>
                   </div>
                 </div>
-                <div
-                  className="doc-modal-img-wrap"
-                  onMouseDown={onDocModalMouseDown}
-                  onMouseMove={onDocModalMouseMove}
-                  onMouseUp={endDocModalDrag}
-                  onMouseLeave={endDocModalDrag}
-                >
-                  {docModal.pages.map((p) => (
-                    <div
-                      key={p}
-                      ref={(el) => { if (el) docModalPageRefs.current[p] = el; }}
-                      className="doc-modal-page"
-                    >
-                      <img
-                        src={renderPageUrl(rows[docModal.rowIdx], p, docModal.selectedField)}
-                        alt={`PDF page ${p + 1} with extracted fields highlighted`}
-                        className="doc-modal-img"
-                        draggable={false}
-                        style={{ width: `${docModal.zoom * 100}%`, maxWidth: docModal.zoom > 1 ? "none" : "100%" }}
-                      />
-                    </div>
-                  ))}
-                </div>
                 <div className="muted doc-modal-hint">
                   Drag to pan · click a field to jump to it on the page
                 </div>
@@ -1047,9 +1042,10 @@ export default function App() {
                       value={c === "Policy No." ? formatPolicyNo(docModal.edits[c]) : docModal.edits[c] ?? ""}
                       onFocus={() => selectDocModalField(c)}
                       onClick={() => selectDocModalField(c)}
-                      onChange={(e) =>
-                        setDocModal((m) => ({ ...m, edits: { ...m.edits, [c]: e.target.value } }))
-                      }
+                      onChange={(e) => {
+                        const v = c === "Policy No." ? formatPolicyNo(e.target.value) : e.target.value;
+                        setDocModal((m) => ({ ...m, edits: { ...m.edits, [c]: v } }));
+                      }}
                     />
                   </label>
                 ))}

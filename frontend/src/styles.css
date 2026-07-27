@@ -689,38 +689,10 @@ tbody tr:hover td { background: var(--cell-focus); }
 /* ── Log panel ────────────────────────────────────────── */
 .log-panel { overflow: hidden; }
 
-.log-panel-header {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 0;
-  background: none;
-  border: none;
-  color: var(--text);
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  text-align: left;
-}
-.log-panel-header:hover { background: var(--hover); }
-
-.log-count {
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 1px 7px;
-  font-size: 11px;
-  color: var(--muted);
-}
-
-.log-chevron { margin-left: auto; font-size: 11px; color: var(--muted); }
-
 .log-body {
-  max-height: 260px;
+  max-height: 200px;
   overflow-y: auto;
-  padding: 8px 0 14px;
-  border-top: 1px solid var(--line);
+  padding: 4px 0;
 }
 
 .log-line {
@@ -851,19 +823,33 @@ td.has-loc:hover .verify-badge { opacity: 0.65; }
   flex-direction: column;
   gap: 8px;
 }
-.doc-modal-toolbar {
+/* Viewer: scrollable page stack with the zoom pill floating over its bottom edge */
+.doc-modal-viewer {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+.doc-modal-zoom {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 12px;
-  flex: 0 0 auto;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
 }
-.doc-modal-zoom { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
-.zoom-btn { width: 28px; height: 28px; padding: 0; line-height: 1; font-size: 16px; }
+.zoom-btn { width: 28px; height: 28px; padding: 0; line-height: 1; font-size: 16px; border-radius: 999px; }
 .zoom-level { min-width: 44px; text-align: center; font-size: 12px; color: var(--muted); cursor: pointer; user-select: none; }
 .doc-modal-img-wrap {
   flex: 1 1 auto;
-  min-height: 0;
+  min-width: 0;
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -872,7 +858,8 @@ td.has-loc:hover .verify-badge { opacity: 0.65; }
   flex-direction: column;
   align-items: center;
   gap: 12px;
-  padding: 12px 0;
+  /* Extra bottom room so the last page can scroll clear of the zoom pill. */
+  padding: 12px 0 52px;
   cursor: grab;
   user-select: none;
 }
@@ -911,3 +898,4 @@ td.has-loc:hover .verify-badge { opacity: 0.65; }
   background: var(--panel);
   padding-top: 8px;
 }
+.doc-modal-submit-row .btn { flex: 1 1 0; }

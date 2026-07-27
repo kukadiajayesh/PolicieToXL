@@ -147,10 +147,10 @@ def _register_doc(src_path: str, copy: bool) -> str:
 
 
 def _clean_policy_no(row: dict) -> None:
-    """Collapse stray whitespace runs the OCR/LLM sometimes inserts between digits."""
+    """Drop stray whitespace the OCR/LLM sometimes inserts between digits."""
     val = row.get("Policy No.")
     if isinstance(val, str) and val:
-        row["Policy No."] = re.sub(r"\s+", " ", val).strip()
+        row["Policy No."] = re.sub(r"\s+", "", val)
 
 
 def _augment_row(row: dict, pdf_path: str, copy: bool, pages_words=None, locations=None) -> dict:
