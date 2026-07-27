@@ -457,6 +457,8 @@ def gemini_status(api_key: str) -> dict:
                 {"name": n, "vision": True, "recommended": n == rec} for n in names
             ],
         }
+    except UnicodeEncodeError:
+        return {"ok": False, "error": "API key contains invalid characters"}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
