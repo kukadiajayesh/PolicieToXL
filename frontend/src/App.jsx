@@ -917,16 +917,18 @@ export default function App() {
                       );
                     })}
                     <td className="row-actions">
-                      {row._doc_id && (
-                        <button
-                          className="row-preview-btn"
-                          onClick={() => openDocModal(i)}
-                          title="Preview PDF with all extracted fields"
-                        >
-                          🔍
-                        </button>
-                      )}
-                      <button className="x" onClick={() => deleteRow(i)} title="Delete row">×</button>
+                      <div className="row-actions-stack">
+                        <button className="x" onClick={() => deleteRow(i)} title="Delete row">×</button>
+                        {row._doc_id && (
+                          <button
+                            className="row-preview-btn"
+                            onClick={() => openDocModal(i)}
+                            title="Preview PDF with all extracted fields"
+                          >
+                            🔍
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}

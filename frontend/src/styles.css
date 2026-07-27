@@ -800,7 +800,8 @@ td.has-loc:hover .verify-badge { opacity: 0.65; }
 }
 
 /* Row actions column */
-.row-actions { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.row-actions { vertical-align: middle; white-space: nowrap; padding: 4px 6px; }
+.row-actions-stack { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
 .row-actions .row-preview-btn,
 .row-actions .x {
   width: 26px;
