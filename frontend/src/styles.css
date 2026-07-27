@@ -795,3 +795,88 @@ td.has-loc:hover .verify-badge { opacity: 0.65; }
   font-size: 12px;
   color: var(--muted);
 }
+
+/* Row actions column */
+.row-actions { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.row-preview-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  line-height: 1;
+}
+.row-preview-btn:hover { background: var(--hover); }
+
+/* Full-screen PDF verify modal */
+.doc-modal-overlay {
+  align-items: stretch;
+  justify-content: stretch;
+  padding: 0;
+}
+.doc-modal-card {
+  background: var(--panel);
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 20px;
+}
+.doc-modal-card .modal-head { flex: 0 0 auto; }
+.doc-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  gap: 20px;
+}
+.doc-modal-pdf {
+  flex: 1 1 65%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.doc-modal-pages { display: flex; gap: 6px; flex-wrap: wrap; flex: 0 0 auto; }
+.doc-modal-pages .btn.selected { background: var(--brand); color: #fff; }
+.doc-modal-img-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #444;
+  display: flex;
+  justify-content: center;
+}
+.doc-modal-img { display: block; max-width: 100%; height: auto; }
+.doc-modal-fields {
+  flex: 0 0 340px;
+  min-width: 280px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 4px;
+}
+.doc-modal-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.doc-modal-field-label { color: var(--muted); }
+.doc-modal-field-input {
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: inherit;
+  font-size: 13px;
+}
+.doc-modal-submit-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  position: sticky;
+  bottom: 0;
+  background: var(--panel);
+  padding-top: 8px;
+}

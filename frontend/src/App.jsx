@@ -163,6 +163,7 @@ export default function App() {
   const [logsOpen, setLogsOpen] = useState(false);
   const [preview, setPreview] = useState(null); // {url, x, y, col, loading}
   const [errorHover, setErrorHover] = useState(null); // { text, x, y }
+  const [docModal, setDocModal] = useState(null); // {rowIdx, page, pages, edits}
   const fileInput = useRef(null);
   const folderInput = useRef(null);
   const logsEndRef = useRef(null);
@@ -524,8 +525,9 @@ export default function App() {
 
   const copyAllData = async () => {
     if (!rows.length) return flash("No results to copy.", "error");
+    const copyCols = COLUMNS.filter((c) => c !== "Source File");
     const csv =
-      rows.map((row) => COLUMNS.map((c) => csvField(row[c])).join(",")).join("\n") + "\n";
+      rows.map((row) => copyCols.map((c) => csvField(row[c])).join(",")).join("\n") + "\n";
     try {
       await navigator.clipboard.writeText(csv);
       flash(`Copied ${rows.length} rows to clipboard.`, "info");
@@ -587,6 +589,36 @@ export default function App() {
   };
   const hideErrorHover = () => {
     setErrorHover(null);
+  };
+
+  // ── Full-screen PDF verify modal ────────────────────────────────────────
+  const openDocModal = (rowIdx) => {
+    const row = rows[rowIdx];
+    if (!row?._doc_id) return;
+    const pages = [...new Set(Object.values(row._locations || {}).map((l) => l.page))].sort((a, b) => a - b);
+    const edits = {};
+    COLUMNS.forEach((c) => { edits[c] = row[c] ?? ""; });
+    setDocModal({ rowIdx, page: pages[0] ?? 0, pages, edits });
+  };
+
+  const closeDocModal = () => setDocModal(null);
+
+  const renderPageUrl = (row, page) => {
+    const q = new URLSearchParams({
+      doc_id: row._doc_id,
+      page,
+      locations: JSON.stringify(row._locations || {}),
+    });
+    return `/api/render-page?${q.toString()}`;
+  };
+
+  const submitDocModal = () => {
+    if (!docModal) return;
+    setRows((r) =>
+      r.map((row, i) => (i === docModal.rowIdx ? { ...row, ...docModal.edits } : row))
+    );
+    flash("Row updated.", "info");
+    setDocModal(null);
   };
 
   const cellHoverProps = (row, col) =>
@@ -831,7 +863,16 @@ export default function App() {
                         </td>
                       );
                     })}
-                    <td>
+                    <td className="row-actions">
+                      {row._doc_id && (
+                        <button
+                          className="row-preview-btn"
+                          onClick={() => openDocModal(i)}
+                          title="Preview PDF with all extracted fields"
+                        >
+                          🔍
+                        </button>
+                      )}
                       <button className="x" onClick={() => deleteRow(i)} title="Delete row">×</button>
                     </td>
                   </tr>
@@ -876,6 +917,59 @@ export default function App() {
               onError={() => setPreview((p) => (p ? { ...p, loading: false, failed: true } : p))}
             />
             {preview.failed && <div className="pdf-preview-spinner">Preview unavailable</div>}
+          </div>
+        </div>
+      )}
+
+      {docModal && rows[docModal.rowIdx] && (
+        <div className="modal-overlay doc-modal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) closeDocModal(); }}>
+          <div className="doc-modal-card">
+            <div className="modal-head">
+              <h2>Verify — {rows[docModal.rowIdx]["Source File"]}</h2>
+              <button className="x" onClick={closeDocModal} title="Close">×</button>
+            </div>
+            <div className="doc-modal-body">
+              <div className="doc-modal-pdf">
+                {docModal.pages.length > 1 && (
+                  <div className="doc-modal-pages">
+                    {docModal.pages.map((p) => (
+                      <button
+                        key={p}
+                        className={"btn ghost" + (p === docModal.page ? " selected" : "")}
+                        onClick={() => setDocModal((m) => ({ ...m, page: p }))}
+                      >
+                        Page {p + 1}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className="doc-modal-img-wrap">
+                  <img
+                    src={renderPageUrl(rows[docModal.rowIdx], docModal.page)}
+                    alt="PDF page with extracted fields highlighted"
+                    className="doc-modal-img"
+                  />
+                </div>
+              </div>
+              <div className="doc-modal-fields">
+                {COLUMNS.filter((c) => c !== "Source File").map((c) => (
+                  <label key={c} className="doc-modal-field">
+                    <span className="doc-modal-field-label">{c}</span>
+                    <input
+                      className="doc-modal-field-input"
+                      value={docModal.edits[c] ?? ""}
+                      onChange={(e) =>
+                        setDocModal((m) => ({ ...m, edits: { ...m.edits, [c]: e.target.value } }))
+                      }
+                    />
+                  </label>
+                ))}
+                <div className="doc-modal-submit-row">
+                  <button className="btn primary" onClick={submitDocModal}>Submit</button>
+                  <button className="btn ghost" onClick={closeDocModal}>Cancel</button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}

@@ -256,6 +256,29 @@ def _render_crop(doc_id: str, page_no: int, bbox) -> bytes:
     out.save(buf, "PNG")
     buf.seek(0)
     return buf.getvalue()
+
+
+def _render_page_with_highlights(doc_id: str, page_no: int, boxes: list) -> bytes:
+    """Return PNG bytes of a full page with every located field's bbox outlined.
+
+    ``boxes`` is a list of (label, (x0, top, x1, bottom)) in PDF points.
+    """
+    page = _render_page(doc_id, page_no)
+    s = _PREVIEW_SCALE
+    overlay = Image.new("RGBA", page.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    for _label, (x0, top, x1, bottom) in boxes:
+        draw.rectangle(
+            [x0 * s - 2, top * s - 2, x1 * s + 2, bottom * s + 2],
+            fill=(255, 214, 0, 70),
+            outline=(240, 150, 0, 255),
+            width=2,
+        )
+    out = Image.alpha_composite(page.convert("RGBA"), overlay).convert("RGB")
+    buf = io.BytesIO()
+    out.save(buf, "PNG")
+    buf.seek(0)
+    return buf.getvalue()
 # ────────────────────────────────────────────────────────────────────────────
 
 app = Flask(__name__, static_folder=None)
@@ -459,6 +482,45 @@ def preview():
         return jsonify({"error": "Bad preview parameters."}), 400
     try:
         png = _render_crop(doc_id, page_no, bbox)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": str(e)}), 500
+    return send_file(io.BytesIO(png), mimetype="image/png")
+
+
+@app.route("/api/render-page", methods=["GET"])
+def render_page():
+    """Render a full PDF page with every located field's bbox highlighted.
+
+    Query params: doc_id, page, locations (JSON: {field: {page, bbox}}).
+    Only boxes whose page matches the requested page are drawn. Returns a PNG.
+    """
+    doc_id = request.args.get("doc_id", "")
+    with _DOC_LOCK:
+        path = _DOC_REGISTRY.get(doc_id)
+    if not path or not os.path.isfile(path):
+        return jsonify({"error": "Unknown document."}), 404
+    try:
+        page_no = int(request.args.get("page", "0"))
+    except ValueError:
+        return jsonify({"error": "Bad page number."}), 400
+    if page_no < 0:
+        return jsonify({"error": "Bad page number."}), 400
+    try:
+        locations = json.loads(request.args.get("locations", "{}"))
+    except ValueError:
+        locations = {}
+    boxes = []
+    for label, loc in (locations or {}).items():
+        try:
+            if int(loc.get("page", -1)) != page_no:
+                continue
+            bbox = loc["bbox"]
+            box = (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
+        except (KeyError, TypeError, ValueError, IndexError):
+            continue
+        boxes.append((label, box))
+    try:
+        png = _render_page_with_highlights(doc_id, page_no, boxes)
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": str(e)}), 500
     return send_file(io.BytesIO(png), mimetype="image/png")
