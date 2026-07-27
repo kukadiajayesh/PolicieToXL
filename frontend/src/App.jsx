@@ -145,6 +145,10 @@ export default function App() {
   const [theme, setTheme] = useState(
     () => localStorage.getItem("theme") || "system"
   );
+  const [concurrency, setConcurrency] = useState(() => {
+    const n = parseInt(localStorage.getItem("concurrency"), 10);
+    return Number.isFinite(n) && n >= 1 && n <= 100 ? n : 5;
+  });
   const [engine, setEngine] = useState("gemini");
   const [geminiModels, setGeminiModels] = useState([]);
   const [geminiModel, setGeminiModel] = useState("");
@@ -163,6 +167,10 @@ export default function App() {
   const folderInput = useRef(null);
   const logsEndRef = useRef(null);
   const hoverTimer = useRef(null);
+
+  useEffect(() => {
+    localStorage.setItem("concurrency", String(concurrency));
+  }, [concurrency]);
 
   useEffect(() => {
     localStorage.setItem("theme", theme);
@@ -458,8 +466,8 @@ export default function App() {
     setBusy(true);
     // Row order follows each file's position in the queue.
     const order = new Map(queue.map((it, i) => [it.id, i]));
-    // Gemini is cloud API — a little concurrency is fine, but stay under rate limits.
-    const limit = 2;
+    // Gemini is cloud API — concurrency is user-configurable (Settings), capped at 100.
+    const limit = Math.min(100, Math.max(1, concurrency || 1));
     let next = 0;
     const worker = async () => {
       while (next < targets.length) {
@@ -945,6 +953,32 @@ export default function App() {
               {geminiKeyError && <div className="ollama-err">✕ {geminiKeyError}</div>}
             </div>
 
+            <div className="settings-section">
+              <div className="settings-section-head">
+                <h3>Parallel requests</h3>
+              </div>
+              <p className="muted settings-hint">
+                How many PDFs to send to Gemini at the same time. Higher values
+                finish faster but are more likely to hit Gemini's rate limits.
+              </p>
+              <div className="gemini-key-row">
+                <input
+                  className="gemini-key-input settings-key-input"
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={concurrency}
+                  onChange={(e) => {
+                    const n = parseInt(e.target.value, 10);
+                    if (Number.isFinite(n)) {
+                      setConcurrency(Math.min(100, Math.max(1, n)));
+                    } else if (e.target.value === "") {
+                      setConcurrency(1);
+                    }
+                  }}
+                />
+              </div>
+            </div>
 
           </div>
         </div>
