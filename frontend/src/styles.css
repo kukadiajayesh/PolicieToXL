@@ -21,6 +21,8 @@
   --shadow-strong: rgba(0, 0, 0, 0.4);
   --hover: #28324b;
   --cell-focus: rgba(91, 140, 255, 0.1);
+  --shimmer: rgba(255, 255, 255, 0.28);
+  --shimmer-mid: rgba(255, 255, 255, 0.16);
 }
 
 /* Light theme */
@@ -36,6 +38,8 @@
   --shadow-strong: rgba(33, 50, 92, 0.18);
   --hover: #e7ecf6;
   --cell-focus: rgba(91, 140, 255, 0.14);
+  --shimmer: rgba(20, 30, 55, 0.16);
+  --shimmer-mid: rgba(20, 30, 55, 0.08);
 }
 
 * { box-sizing: border-box; }
@@ -271,9 +275,9 @@ body {
   background: linear-gradient(
     100deg,
     transparent 30%,
-    rgba(255, 255, 255, 0.16) 45%,
-    rgba(255, 255, 255, 0.28) 50%,
-    rgba(255, 255, 255, 0.16) 55%,
+    var(--shimmer-mid) 45%,
+    var(--shimmer) 50%,
+    var(--shimmer-mid) 55%,
     transparent 70%
   );
   background-size: 250% 100%;

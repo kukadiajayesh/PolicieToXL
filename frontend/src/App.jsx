@@ -129,9 +129,16 @@ const THEME_META = {
   dark: { icon: "🌙", label: "Dark" },
 };
 
+const autoGrowCell = (el) => {
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = el.scrollHeight + "px";
+};
+
 export default function App() {
   const [queue, setQueue] = useState([]);
   const [rows, setRows] = useState([]);
+  const tableWrapRef = useRef(null);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState(null);
   const [dragging, setDragging] = useState(false);
@@ -475,6 +482,11 @@ export default function App() {
     if (!busy && queue.some((it) => it.status === "pending")) runAll();
   }, [queue, busy]);
 
+  useEffect(() => {
+    if (!tableWrapRef.current) return;
+    tableWrapRef.current.querySelectorAll("textarea.cell").forEach(autoGrowCell);
+  }, [rows]);
+
   const removeItem = (id) => {
     setQueue((q) => q.filter((it) => it.id !== id));
   };
@@ -758,7 +770,7 @@ export default function App() {
         {rows.length === 0 ? (
           <div className="empty">Extracted rows will appear here — fully editable before export.</div>
         ) : (
-          <div className="table-wrap">
+          <div className="table-wrap" ref={tableWrapRef}>
             <table>
               <thead>
                 <tr>
@@ -801,8 +813,10 @@ export default function App() {
                         <td key={c} className={tdClass("")} {...cellHoverProps(row, c)}>
                           <textarea
                             className="cell"
+                            ref={autoGrowCell}
                             value={CAMEL_COLS.has(c) ? toTitleCase(raw) : raw}
                             onChange={(e) => editCell(i, c, e.target.value)}
+                            onInput={(e) => autoGrowCell(e.target)}
                             rows={1}
                           />
                           {verifyBadge}
