@@ -403,17 +403,6 @@ def gemini_status(api_key: str) -> dict:
     if not api_key:
         return {"ok": False, "error": "No API key configured"}
     try:
-        # HTTP header values must be Latin-1; a stray pasted character (e.g. an
-        # icon or symbol copied alongside the key) would otherwise crash deep
-        # inside requests with an opaque UnicodeEncodeError.
-        api_key.encode("latin-1")
-    except UnicodeEncodeError:
-        return {
-            "ok": False,
-            "error": "API key contains characters that aren't allowed — check that "
-                     "only the key itself (no extra text) was pasted.",
-        }
-    try:
         r = _requests.get(
             f"{GEMINI_API_URL}/models",
             params={"pageSize": 100},
@@ -428,9 +417,7 @@ def gemini_status(api_key: str) -> dict:
             return {"ok": False, "error": detail or f"HTTP {r.status_code}"}
         names = []
         for m in r.json().get("models", []):
-            name = m.get("name") or ""
-            if name.startswith("models/"):
-                name = name[len("models/"):]
+            name = (m.get("name") or "").removeprefix("models/")
             if "gemini" not in name.lower():
                 continue
             if "generateContent" not in (m.get("supportedGenerationMethods") or []):

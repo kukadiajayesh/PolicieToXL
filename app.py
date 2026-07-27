@@ -159,47 +159,11 @@ def _augment_row(row: dict, pdf_path: str, copy: bool, pages_words=None, locatio
     return row
 
 
-# ── Secure API-key storage ──────────────────────────────────────────────────
-# The env var wins; otherwise keys saved from the UI live in the macOS
-# Keychain (encrypted at rest, gated by the user's login session) — never in
-# a plaintext file. Non-macOS platforms fall back to the config file.
+# ── API-key storage ──────────────────────────────────────────────────────────
+# The env var wins; otherwise a key saved from the UI lives in a plain JSON
+# config file in the user's home directory.
 _CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".pdfxl_config.json")
 _CONFIG_LOCK = threading.Lock()
-_KEYCHAIN_OK = sys.platform == "darwin"
-_KEYCHAIN_ACCOUNT = os.environ.get("USER") or "pdfxl"
-_GEMINI_KEYCHAIN_SERVICE = "pdfxl-gemini-api-key"
-
-
-def _keychain_get(service: str) -> str:
-    if not _KEYCHAIN_OK:
-        return ""
-    try:
-        r = subprocess.run(
-            ["security", "find-generic-password",
-             "-s", service, "-a", _KEYCHAIN_ACCOUNT, "-w"],
-            capture_output=True, text=True, timeout=5,
-        )
-        return r.stdout.strip() if r.returncode == 0 else ""
-    except (OSError, subprocess.SubprocessError):
-        return ""
-
-
-def _keychain_set(service: str, key: str) -> bool:
-    """Store (or clear, when key is empty) a secret in the login keychain."""
-    if not _KEYCHAIN_OK:
-        return False
-    try:
-        if key:
-            cmd = ["security", "add-generic-password", "-U",
-                   "-s", service, "-a", _KEYCHAIN_ACCOUNT, "-w", key]
-        else:
-            cmd = ["security", "delete-generic-password",
-                   "-s", service, "-a", _KEYCHAIN_ACCOUNT]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-        # Deleting an item that doesn't exist still means "key is cleared".
-        return r.returncode == 0 or not key
-    except (OSError, subprocess.SubprocessError):
-        return False
 
 
 def _config_read() -> dict:
@@ -212,45 +176,24 @@ def _config_read() -> dict:
 
 
 def _config_write_key(config_key: str, key: str | None) -> None:
-    """Set (or drop, when None) one entry in the config file."""
+    """Set (or drop, when None/empty) one entry in the config file."""
     with _CONFIG_LOCK:
         cfg = _config_read()
-        if key is None:
-            if config_key not in cfg:
-                return
-            cfg.pop(config_key, None)
-        else:
+        if key:
             cfg[config_key] = key
+        else:
+            cfg.pop(config_key, None)
         with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
-    try:
-        os.chmod(_CONFIG_PATH, 0o600)  # may still hold a secret on non-macOS
-    except OSError:
-        pass
-
-
-def _load_saved_key(service: str, config_key: str) -> str:
-    key = _keychain_get(service)
-    if key:
-        return key
-    # Legacy plaintext fallback (pre-Keychain saves / non-macOS platforms).
-    return str(_config_read().get(config_key) or "")
-
-
-def _save_key(service: str, config_key: str, key: str) -> None:
-    if _keychain_set(service, key):
-        _config_write_key(config_key, None)  # scrub any plaintext copy
-    else:
-        _config_write_key(config_key, key)  # non-macOS fallback
 
 
 # ── Gemini API key ──────────────────────────────────────────────────────────
 def _load_saved_gemini_key() -> str:
-    return _load_saved_key(_GEMINI_KEYCHAIN_SERVICE, "gemini_api_key")
+    return str(_config_read().get("gemini_api_key") or "")
 
 
 def _save_gemini_key(key: str) -> None:
-    _save_key(_GEMINI_KEYCHAIN_SERVICE, "gemini_api_key", key)
+    _config_write_key("gemini_api_key", key)
 
 
 def _gemini_key() -> str:
