@@ -417,7 +417,9 @@ def gemini_status(api_key: str) -> dict:
             return {"ok": False, "error": detail or f"HTTP {r.status_code}"}
         names = []
         for m in r.json().get("models", []):
-            name = (m.get("name") or "").removeprefix("models/")
+            name = m.get("name") or ""
+            if name.startswith("models/"):
+                name = name[len("models/"):]
             if "gemini" not in name.lower():
                 continue
             if "generateContent" not in (m.get("supportedGenerationMethods") or []):
