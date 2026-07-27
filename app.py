@@ -372,6 +372,9 @@ def api_gemini_key():
 
     data = request.get_json(silent=True) or {}
     key = (data.get("api_key") or "").strip()
+    # Copy/paste can smuggle in invisible unicode (non-breaking spaces, smart
+    # quotes, zero-width chars); real Gemini keys are plain ASCII.
+    key = key.encode("ascii", "ignore").decode("ascii").strip()
     if not key:
         return jsonify({"ok": False, "error": "Empty API key"}), 400
     status = gemini_status(key)  # listing models doubles as key validation
