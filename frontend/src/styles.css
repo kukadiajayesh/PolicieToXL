@@ -809,7 +809,22 @@ td.has-loc:hover .verify-badge { opacity: 0.65; }
   flex-direction: column;
   padding: 16px 20px;
 }
-.doc-modal-card .modal-head { flex: 0 0 auto; }
+.doc-modal-card .modal-head { flex: 0 0 auto; gap: 12px; }
+.doc-modal-card .modal-head h2 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.doc-modal-nav { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.nav-btn { width: 28px; height: 28px; padding: 0; line-height: 1; font-size: 18px; border-radius: 999px; }
+.doc-modal-count {
+  min-width: 54px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  user-select: none;
+}
 .doc-modal-body {
   flex: 1 1 auto;
   min-height: 0;

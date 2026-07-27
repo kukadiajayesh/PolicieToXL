@@ -602,18 +602,59 @@ export default function App() {
   // ── Full-screen PDF verify modal ────────────────────────────────────────
   const docModalPageRefs = useRef({});
   const docModalDrag = useRef(null);
+  const docModalWrapRef = useRef(null);
 
-  const openDocModal = (rowIdx) => {
+  // Rows that can be opened in the verify modal, in table order — the set the
+  // prev/next arrows step through.
+  const docRowIdxs = useMemo(
+    () => rows.map((r, i) => (r._doc_id ? i : -1)).filter((i) => i >= 0),
+    [rows]
+  );
+
+  const openDocModal = (rowIdx, zoom = 1) => {
     const row = rows[rowIdx];
     if (!row?._doc_id) return;
     const pages = [...new Set(Object.values(row._locations || {}).map((l) => l.page))].sort((a, b) => a - b);
     const edits = {};
     COLUMNS.forEach((c) => { edits[c] = c === "Policy No." ? formatPolicyNo(row[c]) : row[c] ?? ""; });
     docModalPageRefs.current = {};
-    setDocModal({ rowIdx, pages, edits, zoom: 1, selectedField: null });
+    setDocModal({ rowIdx, pages, edits, zoom, selectedField: null });
   };
 
   const closeDocModal = () => setDocModal(null);
+
+  const applyDocEdits = (m) =>
+    setRows((r) => r.map((row, i) => (i === m.rowIdx ? { ...row, ...m.edits } : row)));
+
+  // Step to the previous/next document, keeping any edits made on this one.
+  const docModalPos = docModal ? docRowIdxs.indexOf(docModal.rowIdx) : -1;
+  const stepDocModal = (dir) => {
+    if (!docModal) return;
+    const next = docRowIdxs[docModalPos + dir];
+    if (next === undefined) return;
+    applyDocEdits(docModal);
+    openDocModal(next, docModal.zoom);
+  };
+
+  // Fresh document → start at the top of the page stack.
+  useEffect(() => {
+    const wrap = docModalWrapRef.current;
+    if (wrap) { wrap.scrollTop = 0; wrap.scrollLeft = 0; }
+  }, [docModal?.rowIdx]);
+
+  // Arrow keys navigate; Esc closes. Ignored while typing in a field.
+  useEffect(() => {
+    if (!docModal) return;
+    const onKey = (e) => {
+      if (e.key === "Escape") { closeDocModal(); return; }
+      const tag = e.target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || e.target?.isContentEditable) return;
+      if (e.key === "ArrowLeft") { e.preventDefault(); stepDocModal(-1); }
+      else if (e.key === "ArrowRight") { e.preventDefault(); stepDocModal(1); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   const renderPageUrl = (row, page, selectedField) => {
     const q = new URLSearchParams({
@@ -669,9 +710,7 @@ export default function App() {
 
   const submitDocModal = () => {
     if (!docModal) return;
-    setRows((r) =>
-      r.map((row, i) => (i === docModal.rowIdx ? { ...row, ...docModal.edits } : row))
-    );
+    applyDocEdits(docModal);
     flash("Row updated.", "info");
     setDocModal(null);
   };
@@ -976,13 +1015,35 @@ export default function App() {
           <div className="doc-modal-card">
             <div className="modal-head">
               <h2>Verify — {rows[docModal.rowIdx]["Source File"]}</h2>
-              <button className="x" onClick={closeDocModal} title="Close">×</button>
+              <div className="doc-modal-nav">
+                <button
+                  className="btn ghost nav-btn"
+                  onClick={() => stepDocModal(-1)}
+                  disabled={docModalPos <= 0}
+                  title="Previous record (←)"
+                >
+                  ‹
+                </button>
+                <span className="doc-modal-count">
+                  {docModalPos + 1} / {docRowIdxs.length}
+                </span>
+                <button
+                  className="btn ghost nav-btn"
+                  onClick={() => stepDocModal(1)}
+                  disabled={docModalPos < 0 || docModalPos >= docRowIdxs.length - 1}
+                  title="Next record (→)"
+                >
+                  ›
+                </button>
+                <button className="x" onClick={closeDocModal} title="Close">×</button>
+              </div>
             </div>
             <div className="doc-modal-body">
               <div className="doc-modal-pdf">
                 <div className="doc-modal-viewer">
                   <div
                     className="doc-modal-img-wrap"
+                    ref={docModalWrapRef}
                     onMouseDown={onDocModalMouseDown}
                     onMouseMove={onDocModalMouseMove}
                     onMouseUp={endDocModalDrag}
@@ -1027,7 +1088,7 @@ export default function App() {
                   </div>
                 </div>
                 <div className="muted doc-modal-hint">
-                  Drag to pan · click a field to jump to it on the page
+                  Drag to pan · click a field to jump to it on the page · ← → for previous/next record
                 </div>
               </div>
               <div className="doc-modal-fields">
