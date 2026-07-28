@@ -1,6 +1,5 @@
 # Node / frontend build
 node_modules/
-frontend/dist/
 frontend/node_modules/
 
 # Python
