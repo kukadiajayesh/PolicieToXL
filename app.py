@@ -666,6 +666,23 @@ def stream_logs():
     )
 
 
+@app.route("/api/shutdown", methods=["POST"])
+def shutdown():
+    """Stop the server process.
+
+    The production build runs headless (no console window), so this is the
+    only way to stop it short of killing the process — the UI's Quit button
+    calls this.
+    """
+    def _stop():
+        time.sleep(0.3)  # let the response above reach the browser first
+        shutil.rmtree(_DOC_DIR, ignore_errors=True)  # atexit won't run under os._exit
+        os._exit(0)
+
+    threading.Thread(target=_stop, daemon=True).start()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/pick_output", methods=["POST"])
 def pick_output():
     """Open a native save-file dialog and return the chosen path."""
@@ -688,12 +705,47 @@ def pick_output():
         return jsonify({"error": str(e)}), 500
 
 
+def _port_open(host: str, port: int, timeout: float = 0.5) -> bool:
+    """True if something is already listening on host:port."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        return s.connect_ex((host, port)) == 0
+
+
+def _open_browser_when_ready(url: str, host: str, port: int, timeout: float = 15.0) -> None:
+    """Poll until the server is accepting connections, then open the browser.
+
+    Runs in a background thread started before app.run() blocks the main
+    thread, so the browser opens itself instead of requiring a manual visit.
+    """
+    import webbrowser
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _port_open(host, port, timeout=0.3):
+            webbrowser.open(url)
+            return
+        time.sleep(0.2)
+
+
 if __name__ == "__main__":
-    url = "http://127.0.0.1:5001"
+    import webbrowser
+    host, port = "127.0.0.1", 5001
+    url = f"http://{host}:{port}"
+
+    if _port_open(host, port):
+        # Already running (e.g. a previous launch) — just focus a browser tab.
+        print(f"{url} is already running — opening browser.")
+        webbrowser.open(url)
+        sys.exit(0)
+
     print(f"Insurance PDF extractor running at {url}")
-    print("Open that URL in your browser. (Ctrl+C here to stop the server)")
+    print("Opening in your default browser. (Ctrl+C here to stop the server)")
+    threading.Thread(
+        target=_open_browser_when_ready, args=(url, host, port), daemon=True
+    ).start()
     try:
-        app.run(host="127.0.0.1", port=5001, threaded=True, debug=False, use_reloader=False)
+        app.run(host=host, port=port, threaded=True, debug=False, use_reloader=False)
     except OSError as e:
-        print(f"Could not start on 127.0.0.1:5001 ({e}). Is the app already running?")
+        print(f"Could not start on {host}:{port} ({e}). Is the app already running?")
         sys.exit(1)

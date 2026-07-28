@@ -256,6 +256,21 @@ export default function App() {
     }
   };
 
+  const quitApp = async () => {
+    if (!window.confirm("Stop the server and close the app?")) return;
+    try {
+      await fetch("/api/shutdown", { method: "POST" });
+    } catch {
+      // Server may drop the connection before responding — that's expected.
+    }
+    // Browsers only allow window.close() on tabs opened by script, so this is
+    // a best-effort attempt; the message below covers the case it's ignored.
+    window.close();
+    document.body.innerHTML =
+      '<div style="display:flex;align-items:center;justify-content:center;height:100vh;' +
+      'font:16px system-ui;color:#888;">Server stopped — you can close this tab.</div>';
+  };
+
   const saveGeminiKey = async () => {
     const key = geminiKeyInput.trim();
     if (!key) return;
@@ -752,6 +767,23 @@ export default function App() {
           <button className="theme-toggle" onClick={openSettings} title="Settings">
             <span className="t-icon">⚙</span>
             Settings
+          </button>
+          <button className="theme-toggle" onClick={quitApp} title="Stop the server and close the app">
+            <svg
+              className="t-icon quit-icon"
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M18.36 6.64a9 9 0 1 1-12.73 0" />
+              <line x1="12" y1="2" x2="12" y2="12" />
+            </svg>
+            Quit
           </button>
           <span className="offline-pill">● Local only</span>
         </div>

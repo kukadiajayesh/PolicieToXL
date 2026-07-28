@@ -73,7 +73,8 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,            # server logs + Ctrl+C to stop; there's no window UI
+    console=False,           # runs silently; logs are visible in the UI (SSE) and
+                              # app.py opens the default browser itself on start
     disable_windowed_traceback=False,
     target_arch=None,        # build for the host arch
     codesign_identity=None,
