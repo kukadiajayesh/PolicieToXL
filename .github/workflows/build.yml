@@ -5,7 +5,8 @@ name: Build binaries
 # artifacts for Windows / macOS / Linux. PyInstaller cannot cross-compile,
 # so each OS (and macOS architecture) is built on its own runner:
 #   Windows        -> InsurancePolicyExtractorSetup.exe (Inno Setup installer,
-#                      installs and runs on Windows 7 SP1 through 11)
+#                      bundles both x64 and x86 builds and installs and runs
+#                      on Windows 7 SP1 through 11, 32-bit or 64-bit)
 #   macOS Intel    -> InsurancePolicyExtractor-macos-x64.dmg   (macOS 12+)
 #   macOS Apple Si -> InsurancePolicyExtractor-macos-arm64.dmg (macOS 12+)
 #   Linux          -> InsurancePolicyExtractor-x86_64.AppImage (any modern
@@ -42,14 +43,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Windows must freeze with Python 3.8: CPython 3.9+ does not run on
-      # Windows 7 at all (not just an installer restriction — the interpreter
-      # itself won't launch there), and installer.iss/PACKAGING.md commit this
-      # app to supporting Windows 7 SP1+. macOS/Linux have no such floor, so
-      # they stay on a current Python.
+      # Windows must freeze with Python 3.8.2 EXACTLY (not just "3.8"):
+      # CPython 3.9+ does not run on Windows 7 at all (not just an installer
+      # restriction — the interpreter itself won't launch there). But 3.8.3+
+      # also silently breaks Windows 7 — a build-toolset bump pulled in a
+      # dependency on api-ms-win-core-path-l1-1-0.dll, an api-set Windows 7
+      # can't resolve (no ApiSet Schema, and Microsoft never shipped a
+      # redistributable stub for it, unlike the api-ms-win-crt-* ones covered
+      # by vc_redist below). 3.8.2 is the last patch release built without
+      # that dependency. installer.iss/PACKAGING.md commit this app to
+      # supporting Windows 7 SP1+, so don't float this version. macOS/Linux
+      # have no such floor, so they stay on a current Python. Windows freezes
+      # with BOTH x64 and x86 interpreters (below) since the installer
+      # bundles both architectures; this default setup is used for
+      # macOS/Linux only.
       - uses: actions/setup-python@v5
+        if: runner.os != 'Windows'
         with:
-          python-version: ${{ runner.os == 'Windows' && '3.8' || '3.11' }}
+          python-version: "3.11"
 
       - uses: actions/setup-node@v4
         with:
@@ -62,14 +73,54 @@ jobs:
           npm run build
 
       - name: Install Python build deps
+        if: runner.os != 'Windows'
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-build.txt
 
       - name: PyInstaller build
+        if: runner.os != 'Windows'
         run: pyinstaller app.spec
 
-      # ── Windows: Inno Setup installer ──────────────────────────────────
+      # ── Windows: freeze x64 and x86, then Inno Setup installer ─────────
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Windows'
+        with:
+          python-version: "3.8.2"
+          architecture: "x64"
+
+      - name: Install Python build deps (x64)
+        if: runner.os == 'Windows'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt -c constraints-x64.txt
+
+      - name: PyInstaller build (x64)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          pyinstaller app.spec
+          Move-Item dist\InsurancePolicyExtractor dist\InsurancePolicyExtractor-x64
+
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Windows'
+        with:
+          python-version: "3.8.2"
+          architecture: "x86"
+
+      - name: Install Python build deps (x86)
+        if: runner.os == 'Windows'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt -c constraints-x86.txt
+
+      - name: PyInstaller build (x86)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          pyinstaller app.spec
+          Move-Item dist\InsurancePolicyExtractor dist\InsurancePolicyExtractor-x86
+
       - name: Install Inno Setup
         if: runner.os == 'Windows'
         run: choco install innosetup --no-progress -y
@@ -77,11 +128,12 @@ jobs:
       # Bundled into the installer so Windows 7 machines (which don't ship
       # the Universal C Runtime the frozen Python 3.8 exe needs) still launch
       # the app — see the comment on VCRedistNeedsInstall in installer.iss.
-      - name: Download VC++ redistributable
+      - name: Download VC++ redistributables
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "packaging\windows\vc_redist.x64.exe"
+          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x86.exe" -OutFile "packaging\windows\vc_redist.x86.exe"
 
       - name: Build Windows installer
         if: runner.os == 'Windows'
@@ -91,12 +143,13 @@ jobs:
           $env:APP_VERSION = $version
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\windows\installer.iss
 
-      - name: Package Windows portable zip
+      - name: Package Windows portable zips
         if: runner.os == 'Windows'
         shell: bash
         run: |
           cd dist
-          7z a ../InsurancePolicyExtractor-windows-portable.zip InsurancePolicyExtractor
+          7z a ../InsurancePolicyExtractor-windows-x64-portable.zip InsurancePolicyExtractor-x64
+          7z a ../InsurancePolicyExtractor-windows-x86-portable.zip InsurancePolicyExtractor-x86
 
       # ── macOS: .dmg ─────────────────────────────────────────────────────
       - name: Build macOS dmg

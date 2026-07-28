@@ -1,0 +1,31 @@
+# Pip *constraints* file (not a requirements file - only narrows versions of
+# packages that requirements-build.txt already asks for; doesn't add new
+# top-level requirements. That distinction matters here: a plain "pandas==...
+# " requirement line placed alongside requirements.txt's unconstrained
+# "pandas>=2.0" does NOT get intersected by pip before it tries to fetch
+# metadata, so pip still attempts the newest sdist-only release and fails to
+# build it. A constraints file restricts the candidate set up front instead.
+#
+# Used only for the 32-bit (x86) Windows PyInstaller build leg, where there's
+# no MSVC toolchain to compile anything from source:
+#
+# pandas hasn't shipped a win32 wheel since 2.0.3 (nothing newer publishes
+# one, on any Python) - and 2.0.3's own win32 wheels stop at cp311, capping
+# the interpreter version for this leg.
+pandas==2.0.3
+
+# cryptography (pulled in transitively by pdfminer.six) needs pinning for two
+# independent reasons that both land on the same version here:
+#   1. It stopped shipping a win32 wheel after 48.0.1 (49.0.0+ is sdist-only
+#      for win32, and this leg has no MSVC toolchain to build it).
+#   2. Its 42.x+ series switched to a Rust toolchain that calls
+#      GetSystemTimePreciseAsFileTime, a Windows 8+ API — importing it
+#      crashes with "DLL load failed" on Windows 7/8/8.1, which is exactly
+#      what this Windows build targets. requirements.txt has a
+#      platform_release-conditioned pin for this same reason, but that marker
+#      evaluates against the *build* machine, not the frozen target — it's a
+#      no-op when building on Windows 10/11/CI like this project always does,
+#      so the real pin has to live here instead, applied unconditionally.
+# 41.0.7 is the last release built against the older (pre-crash) toolchain
+# and also the last with a win32 wheel, satisfying both constraints at once.
+cryptography==41.0.7

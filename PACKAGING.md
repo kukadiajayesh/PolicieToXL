@@ -60,19 +60,28 @@ frozen Python + a browser can run":
 The only runtime requirement on the target machine is *some* installed
 browser (all of the above ship one by default) — nothing else to install.
 
-### Why the Windows CI job is pinned to Python 3.8
+### Why the Windows CI job is pinned to Python 3.8.2 exactly
 
 CPython 3.9+ does not run on Windows 7 at all — this isn't just an installer
-restriction, the interpreter itself won't launch there (Python 3.8 was the
-last version to support it). PyInstaller bundles whichever Python built it,
-so **the Windows build job in `.github/workflows/build.yml` must use Python
-3.8** or the frozen `.exe` silently stops working on Windows 7 even though
-`installer.iss`'s `MinVersion=6.1sp1` still lets the installer run there.
-macOS/Linux have no such floor and stay on a current Python version.
+restriction, the interpreter itself won't launch there. But **not just any
+3.8.x** works either: 3.8.3 and later were built with a newer MSVC toolset
+that pulled in a dependency on `api-ms-win-core-path-l1-1-0.dll`, an
+api-set that Windows 7 has no way to resolve (see the "Known gotchas" entry
+below) — so those patch releases silently fail to launch on Windows 7 too,
+even though python.org still lists all of 3.8 as Windows-7-compatible.
+**3.8.2 is the last patch release built without that dependency.**
 
-If you ever bump the Windows job's Python version, either keep it at 3.8 or
-explicitly drop Windows 7 from the supported-OS table above, the installer's
-`MinVersion`, and this note — don't let them drift out of sync.
+PyInstaller bundles whichever Python built it, so **the Windows build job in
+`.github/workflows/build.yml` must use exactly Python 3.8.2** (both the x64
+and x86 legs) or the frozen `.exe` silently stops working on Windows 7 even
+though `installer.iss`'s `MinVersion=6.1sp1` still lets the installer run
+there. macOS/Linux have no such floor and stay on a current Python version.
+
+If you ever bump the Windows job's Python version, either keep it at exactly
+3.8.2 or explicitly drop Windows 7 from the supported-OS table above, the
+installer's `MinVersion`, and this note — don't let them drift out of sync.
+`build_installer.ps1` (the local/manual build path) does **not** enforce
+this pin itself — see the note at the top of that script.
 
 All of `app.py` and `extract_policies.py` use `from __future__ import
 annotations` specifically so their type hints (`X | None`, `list[...]`,
@@ -119,19 +128,37 @@ but does not create a Release (releases happen only on tag pushes).
 - **`console=True`** in `app.spec` — there's no window UI, so the console is
   the only way to see server logs and stop the app (Ctrl+C). The Linux
   `.desktop` entry sets `Terminal=true` for the same reason.
-- **Universal C Runtime on Windows 7** — the frozen Python 3.8 exe links
-  against `ucrtbase.dll` / `api-ms-win-crt-*.dll`, which ship built into
-  Windows 10+ but aren't present on a stock Windows 7 SP1 install. Without
-  them the exe fails to launch at all (`api-ms-win-crt-runtime-l1-1-0.dll was
-  not found`), even though the installer itself runs fine down to
-  `MinVersion=6.1sp1`. `installer.iss` bundles the VC++ 2015-2022 x64
-  redistributable and installs it silently before first launch (skipped if
-  already present — see `VCRedistNeedsInstall`). The CI job downloads
-  `vc_redist.x64.exe` from Microsoft before running `iscc` (see
-  `build.yml`); it isn't committed to the repo. Building the installer
-  locally/manually needs the same file at `packaging\windows\vc_redist.x64.exe`
-  — download it from https://aka.ms/vs/17/release/vc_redist.x64.exe first, or
-  the installer will silently skip bundling it (`skipifsourcedoesntexist`).
+- **Universal C Runtime on Windows 7** — the frozen Python exe links against
+  `ucrtbase.dll` / `api-ms-win-crt-*.dll`, which ship built into Windows 10+
+  but aren't present on a stock Windows 7 SP1 install. Without them the exe
+  fails to launch at all (`api-ms-win-crt-runtime-l1-1-0.dll was not found`),
+  even though the installer itself runs fine down to `MinVersion=6.1sp1`.
+  `installer.iss` bundles the VC++ 2015-2022 x64/x86 redistributables and
+  installs them silently before first launch (skipped if already present —
+  see `VCRedistNeedsInstall`). The CI job downloads `vc_redist.x64.exe` /
+  `vc_redist.x86.exe` from Microsoft before running `iscc` (see `build.yml`);
+  they aren't committed to the repo. Building the installer locally/manually
+  needs the same files at `packaging\windows\vc_redist.x64.exe` /
+  `vc_redist.x86.exe` — download from https://aka.ms/vs/17/release/vc_redist.x64.exe
+  and https://aka.ms/vs/17/release/vc_redist.x86.exe first, or the installer
+  will silently skip bundling them (`skipifsourcedoesntexist`).
+
+- **`api-ms-win-core-path-l1-1-0.dll` missing on Windows 7** — a *different*
+  DLL from the one above, and easy to mistake for the same UCRT issue since
+  the error looks identical (`The program can't start because
+  api-ms-win-core-path-l1-1-0.dll is missing`). This one is not a UCRT
+  component — it's an OS-level api-set forwarder that Windows 8+ resolves
+  virtually via the in-box ApiSet Schema, which Windows 7 doesn't have at
+  all. Microsoft never shipped a redistributable stub for it on Windows 7
+  (unlike the `api-ms-win-crt-*` ones above, which `vc_redist` does cover).
+  CPython 3.8.3+ started linking against it due to a build-toolset bump,
+  which silently breaks real Windows 7 support for those patch releases even
+  though python.org still lists all of 3.8 as Windows-7-compatible. The fix
+  is upstream, not packaging: freeze with **exactly Python 3.8.2** (the last
+  patch release built without this dependency) — see "Why the Windows CI job
+  is pinned to Python 3.8.2 exactly" above. If you hit this error after
+  building locally, check the Python version(s) passed to
+  `build_installer.ps1`.
 
 ## Code signing & distribution
 

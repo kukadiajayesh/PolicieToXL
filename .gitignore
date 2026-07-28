@@ -7,6 +7,7 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+.venv32/
 venv/
 
 # Excel output
@@ -17,6 +18,7 @@ app.log
 
 # Downloaded at build time by build.yml, not committed
 packaging/windows/vc_redist.x64.exe
+packaging/windows/vc_redist.x86.exe
 
 # PyInstaller build/output (root level; frontend/dist is intentionally tracked)
 /build/

@@ -1,0 +1,17 @@
+# Pip *constraints* file (not a requirements file - only narrows versions of
+# packages that requirements-build.txt already asks for; doesn't add new
+# top-level requirements).
+#
+# Used only for the 64-bit (x64) Windows PyInstaller build leg:
+#
+# cryptography (pulled in transitively by pdfminer.six) needs pinning because
+# its 42.x+ series switched to a Rust toolchain that calls
+# GetSystemTimePreciseAsFileTime, a Windows 8+ API — importing it crashes
+# with "DLL load failed" on Windows 7/8/8.1, which is exactly what this
+# Windows build targets. requirements.txt has a platform_release-conditioned
+# pin for this same reason, but that marker evaluates against the *build*
+# machine, not the frozen target — it's a no-op when building on Windows
+# 10/11/CI like this project always does, so the real pin has to live here
+# instead, applied unconditionally. 41.0.7 is the last release built against
+# the older (pre-crash) toolchain.
+cryptography==41.0.7
