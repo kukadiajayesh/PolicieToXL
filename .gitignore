@@ -18,6 +18,13 @@ app.log
 # Downloaded at build time by build.yml, not committed
 packaging/windows/vc_redist.x64.exe
 
+# PyInstaller build/output (root level; frontend/dist is intentionally tracked)
+/build/
+/dist/
+
+# Inno Setup installer output
+packaging/windows/Output/
+
 # OS / editor cruft
 .DS_Store
 Thumbs.db
